@@ -11,8 +11,10 @@ note to pull it into your real vault whenever you want it there.
 
 ## Architecture
 
-This is a static frontend (`www/`, deployed via GitHub Pages to
-`campaign.barnyard.site`) talking to `/campaign/*` routes on the existing
+This is a static frontend, deployed via GitHub Pages (repo root, `main`
+branch — GitHub Pages' classic UI only supports root or `/docs`, so
+`index.html` lives at the repo root, not in a subfolder) to
+`campaign.barnyard.site`, talking to `/campaign/*` routes on the existing
 shared Cloudflare Worker at `api.barnyard.site` (the same Worker already
 serving `/price`, `/calendar`, `/generate-notes` — see
 `../ClaudeRepo/cloudflare-worker/`). That Worker is the source of truth for
@@ -28,18 +30,17 @@ for the Worker-side setup once those routes exist.
 
 ## This repo's contents
 
-Just the static frontend:
+Just the static frontend, at repo root:
 
 ```
-www/
-  index.html, styles.css, app.js   hash-routed SPA, no build step
-  lib/
-    api.js                 fetch() wrapper, points at api.barnyard.site/campaign
-    wikilink.js             [[..]] / ![[..]] rendering + note-to-.md download
-    noise.js                 seedable PRNG + value-noise (map generators)
-  views/
-    library.js, campaign.js, new-note.js, map-dungeon.js, map-overworld.js
-preview-server.ps1    local static-file server for previewing www/ during dev
+index.html, styles.css, app.js   hash-routed SPA, no build step
+lib/
+  api.js                 fetch() wrapper, points at api.barnyard.site/campaign
+  wikilink.js             [[..]] / ![[..]] rendering + note-to-.md download
+  noise.js                 seedable PRNG + value-noise (map generators)
+views/
+  library.js, campaign.js, new-note.js, map-dungeon.js, map-overworld.js
+preview-server.ps1    local static-file server for previewing the site during dev
                       (no API logic here any more -- that's all on the Worker)
 ```
 

@@ -1,10 +1,13 @@
-# Minimal static-file server for local preview of www/ during development.
+# Minimal static-file server for local preview during development. The repo
+# root doubles as the GitHub Pages publish root (index.html lives here, not
+# in a subfolder -- GitHub Pages' classic UI only supports repo root or
+# /docs, not an arbitrary folder), so this serves $PSScriptRoot directly.
 # The real app has no local backend any more -- content generation, storage,
 # and everything else lives on api.barnyard.site (see README.md). This just
 # serves the static frontend so you can click through the UI locally; any
 # API call will go out to the real public Worker.
 param(
-    [string]$Root = (Join-Path $PSScriptRoot "www"),
+    [string]$Root = $PSScriptRoot,
     [int]$Port = 5180
 )
 
