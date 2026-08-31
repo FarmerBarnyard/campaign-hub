@@ -130,6 +130,9 @@ form label input, form label textarea, form label select { display: block; width
   position: absolute; top: 10px; right: 10px; background: transparent; color: var(--text-dim);
   font-size: 1.4rem; padding: 0 6px;
 }
+.note-modal-download {
+  margin-bottom: 14px; font-size: 0.8rem; padding: 5px 10px;
+}
 .frontmatter-table { width: 100%; margin-bottom: 16px; border-collapse: collapse; font-size: 0.8rem; }
 .frontmatter-table td { padding: 3px 8px; border-bottom: 1px solid var(--border); color: var(--text-dim); }
 .frontmatter-table td:first-child { color: var(--accent-bright); font-family: var(--mono); }

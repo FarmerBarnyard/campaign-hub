@@ -1,5 +1,5 @@
 function populateCampaignSelect(selectEl) {
-  Api.get('/api/campaigns').then((data) => {
+  Api.get('/campaigns').then((data) => {
     selectEl.innerHTML = '';
     if (!data.campaigns.length) {
       const opt = document.createElement('option');
@@ -33,7 +33,7 @@ function wireMapExportSave(container, canvas, prefix) {
     if (!filename.endsWith('.png')) filename += '.png';
     if (!campaign) { statusEl.textContent = 'No campaign selected — create one in the Library first.'; return; }
     try {
-      const res = await Api.post('/api/map/save-image', { campaign, filename, dataUrl: canvas.toDataURL('image/png') });
+      const res = await Api.post('/map/save-image', { campaign, filename, dataUrl: canvas.toDataURL('image/png') });
       statusEl.textContent = `Saved. Paste ${res.wikilink} into a note to link it.`;
     } catch (e) {
       statusEl.textContent = (e.data && e.data.error === 'file_exists') ? 'A file with that name already exists.' : 'Save failed.';

@@ -21,7 +21,7 @@ async function renderNewNote(container, params) {
         <input id="nn-tone" placeholder="e.g. gritty low-magic, eerie coastal..." autocomplete="off">
       </label>
       <div class="nn-actions">
-        <button type="button" id="nn-generate">Generate draft with Claude</button>
+        <button type="button" id="nn-generate">Generate draft with Ollama</button>
         <span id="nn-generate-status" class="status-text"></span>
       </div>
       <label>Body
@@ -29,6 +29,7 @@ async function renderNewNote(container, params) {
       </label>
       <div class="nn-actions">
         <button type="submit">Save</button>
+        <button type="button" id="nn-download">Download .md</button>
         <span id="nn-save-status" class="status-text"></span>
       </div>
     </form>
@@ -36,7 +37,7 @@ async function renderNewNote(container, params) {
 
   let schema = {};
   try {
-    const allSchemas = await Api.get('/api/schema');
+    const allSchemas = await Api.get('/schema');
     schema = allSchemas[kind] || {};
   } catch (e) { /* fall back to empty schema */ }
 
@@ -61,14 +62,14 @@ async function renderNewNote(container, params) {
     const statusEl = container.querySelector('#nn-generate-status');
     const brief = container.querySelector('#nn-brief').value.trim();
     if (!brief) { statusEl.textContent = 'Write a brief first.'; return; }
-    statusEl.textContent = 'Generating… (10–20s)';
+    statusEl.textContent = 'Generating on the self-hosted model… this can take 30–90s or longer (CPU inference, not a hosted API).';
 
     const hints = {};
     for (const f in fieldInputs) { if (fieldInputs[f].value) hints[f] = fieldInputs[f].value; }
     const tone = container.querySelector('#nn-tone').value.trim();
 
     try {
-      const draft = await Api.post('/api/generate-draft', { campaign, kind, brief, hints, tone });
+      const draft = await Api.post('/generate-draft', { campaign, kind, brief, hints, tone });
       if (draft.parsed) {
         for (const f in fieldInputs) {
           if (draft.frontmatter[f] !== undefined && draft.frontmatter[f] !== null) {
@@ -83,13 +84,20 @@ async function renderNewNote(container, params) {
       }
     } catch (e) {
       if (e.data && e.data.error === 'daily_cap_reached') {
-        statusEl.textContent = 'Daily generation cap reached. Try again tomorrow, or raise the cap in config.local.json.';
-      } else if (e.data && e.data.error === 'no_api_key_configured') {
-        statusEl.textContent = 'No Anthropic API key configured yet (config.local.json). You can still write the note by hand.';
+        statusEl.textContent = 'Daily generation cap reached. Try again tomorrow.';
+      } else if (e.data && e.data.error === 'ollama_unreachable') {
+        statusEl.textContent = 'Could not reach the self-hosted model right now. You can still write the note by hand.';
       } else {
         statusEl.textContent = 'Generation failed. You can still write the note by hand.';
       }
     }
+  });
+
+  container.querySelector('#nn-download').addEventListener('click', () => {
+    const title = container.querySelector('#nn-title').value.trim() || 'untitled';
+    const frontmatter = { tags: [schema.tag || ''] };
+    for (const f in fieldInputs) { frontmatter[f] = fieldInputs[f].value; }
+    downloadNoteAsMarkdown(title, frontmatter, container.querySelector('#nn-body').value);
   });
 
   container.querySelector('#new-note-form').addEventListener('submit', async (ev) => {
@@ -108,7 +116,7 @@ async function renderNewNote(container, params) {
     const body = container.querySelector('#nn-body').value;
 
     try {
-      await Api.post('/api/note', { campaign, path: relPath, frontmatter, body });
+      await Api.post('/note', { campaign, path: relPath, frontmatter, body });
       location.hash = `#/campaign?name=${encodeURIComponent(campaign)}`;
     } catch (e) {
       statusEl.textContent = (e.data && e.data.error === 'file_exists')

@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "campaign-hub",
+      "name": "campaign-hub-preview",
       "runtimeExecutable": "powershell.exe",
-      "runtimeArgs": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "server.ps1"],
-      "port": 8790
+      "runtimeArgs": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "preview-server.ps1"],
+      "port": 5180
     }
   ]
 }

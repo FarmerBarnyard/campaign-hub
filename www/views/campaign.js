@@ -36,7 +36,7 @@ async function renderCampaign(container, params) {
 async function loadCampaignTree(container, campaign, relPath = '') {
   container.innerHTML = 'Loading&hellip;';
   try {
-    const listing = await Api.get(`/api/list?campaign=${encodeURIComponent(campaign)}&path=${encodeURIComponent(relPath)}`);
+    const listing = await Api.get(`/list?campaign=${encodeURIComponent(campaign)}&path=${encodeURIComponent(relPath)}`);
     container.innerHTML = '';
     if (!listing.dirs.length && !listing.files.length) {
       container.innerHTML = '<p class="empty-note">Nothing generated here yet.</p>';
@@ -96,9 +96,18 @@ async function viewNote(campaign, relPath) {
   modal.addEventListener('click', (ev) => { if (ev.target === modal) modal.remove(); });
 
   try {
-    const note = await Api.get(`/api/note?campaign=${encodeURIComponent(campaign)}&path=${encodeURIComponent(relPath)}`);
+    const note = await Api.get(`/note?campaign=${encodeURIComponent(campaign)}&path=${encodeURIComponent(relPath)}`);
     const bodyEl = modal.querySelector('.note-modal-body');
     bodyEl.innerHTML = '';
+
+    const downloadBtn = document.createElement('button');
+    downloadBtn.className = 'note-modal-download';
+    downloadBtn.textContent = 'Download .md';
+    downloadBtn.addEventListener('click', () => {
+      const title = relPath.split('/').pop().replace(/\.md$/, '');
+      downloadNoteAsMarkdown(title, note.frontmatter, note.body);
+    });
+    bodyEl.appendChild(downloadBtn);
 
     const fmTable = document.createElement('table');
     fmTable.className = 'frontmatter-table';
@@ -123,7 +132,7 @@ async function viewNote(campaign, relPath) {
     bodyDiv.querySelectorAll('.wikilink').forEach(async (span) => {
       const name = span.dataset.link;
       try {
-        const res = await Api.get(`/api/resolve-link?campaign=${encodeURIComponent(campaign)}&text=${encodeURIComponent(name)}`);
+        const res = await Api.get(`/resolve-link?campaign=${encodeURIComponent(campaign)}&text=${encodeURIComponent(name)}`);
         if (res.found) {
           span.classList.add('wikilink-resolved');
           span.addEventListener('click', async () => {

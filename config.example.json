@@ -1,9 +1,0 @@
-{
-  "campaignsRoot": "S:\\DND\\Generated Worlds",
-  "port": 8790,
-  "model": "claude-opus-5",
-  "maxTokens": 1200,
-  "dailySpendCapUsd": 5.0,
-  "maxGenerationsPerDay": 30,
-  "apiKey": ""
-}

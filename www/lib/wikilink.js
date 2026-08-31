@@ -40,6 +40,39 @@ function renderNoteBody(container, campaign, body) {
 
   container.querySelectorAll('img[data-embed]').forEach((img) => {
     const name = img.getAttribute('data-embed');
-    img.src = `/api/image?campaign=${encodeURIComponent(campaign)}&name=${encodeURIComponent(name)}`;
+    img.src = `${API_BASE}/image?campaign=${encodeURIComponent(campaign)}&name=${encodeURIComponent(name)}`;
   });
+}
+
+// Serializes frontmatter + body into the same "---\nkey: val\n---\nbody" shape
+// the Worker writes to R2, and triggers a browser download -- this is the
+// bridge for pulling a generated note into the real local Obsidian vault,
+// since a public site can't write to it directly.
+function serializeNoteMarkdown(frontmatter, body) {
+  let out = '---\n';
+  for (const key of Object.keys(frontmatter)) {
+    const val = frontmatter[key];
+    if (Array.isArray(val)) {
+      out += `${key}:\n`;
+      for (const item of val) out += `  - ${item}\n`;
+    } else if (val === null || val === undefined || val === '') {
+      out += `${key}:\n`;
+    } else {
+      out += `${key}: ${val}\n`;
+    }
+  }
+  out += '---\n' + (body || '');
+  return out;
+}
+
+function downloadNoteAsMarkdown(title, frontmatter, body) {
+  const content = serializeNoteMarkdown(frontmatter, body);
+  const filename = title.replace(/[\\/:*?"<>|]/g, '').trim() + '.md';
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }

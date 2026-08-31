@@ -10,7 +10,7 @@ async function renderLibrary(container) {
 
   const listEl = container.querySelector('#lib-list');
   try {
-    const data = await Api.get('/api/campaigns');
+    const data = await Api.get('/campaigns');
     if (!data.campaigns.length) {
       listEl.innerHTML = '<p class="empty-note">No campaigns yet &mdash; create one below.</p>';
     } else {
@@ -41,7 +41,7 @@ async function renderLibrary(container) {
     const name = nameInput.value.trim();
     if (!name) return;
     try {
-      await Api.post('/api/campaigns', { name });
+      await Api.post('/campaigns', { name });
       location.hash = `#/campaign?name=${encodeURIComponent(name)}`;
     } catch (e) {
       alert(e.data && e.data.error === 'campaign_exists' ? 'A campaign with that name already exists.' : 'Could not create campaign.');
