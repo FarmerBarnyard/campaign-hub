@@ -36,7 +36,13 @@ function wireMapExportSave(container, canvas, prefix) {
       const res = await Api.post('/map/save-image', { campaign, filename, dataUrl: canvas.toDataURL('image/png') });
       statusEl.textContent = `Saved. Paste ${res.wikilink} into a note to link it.`;
     } catch (e) {
-      statusEl.textContent = (e.data && e.data.error === 'file_exists') ? 'A file with that name already exists.' : 'Save failed.';
+      if (e.code === 'unauthenticated') {
+        statusEl.textContent = 'You need to be logged in to save maps. Log in (top of page) and try again.';
+      } else if (e.code === 'forbidden') {
+        statusEl.textContent = "You're logged in, but don't have access to save maps.";
+      } else {
+        statusEl.textContent = (e.data && e.data.error === 'file_exists') ? 'A file with that name already exists.' : 'Save failed.';
+      }
     }
   });
 }

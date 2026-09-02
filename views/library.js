@@ -44,7 +44,13 @@ async function renderLibrary(container) {
       await Api.post('/campaigns', { name });
       location.hash = `#/campaign?name=${encodeURIComponent(name)}`;
     } catch (e) {
-      alert(e.data && e.data.error === 'campaign_exists' ? 'A campaign with that name already exists.' : 'Could not create campaign.');
+      if (e.code === 'unauthenticated') {
+        alert('You need to be logged in to create a campaign. Log in (top of page) and try again.');
+      } else if (e.code === 'forbidden') {
+        alert("You're logged in, but don't have access to create campaigns.");
+      } else {
+        alert(e.data && e.data.error === 'campaign_exists' ? 'A campaign with that name already exists.' : 'Could not create campaign.');
+      }
     }
   });
 }

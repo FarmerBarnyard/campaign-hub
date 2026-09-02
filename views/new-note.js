@@ -83,7 +83,11 @@ async function renderNewNote(container, params) {
         statusEl.textContent = 'Could not parse frontmatter — edit the raw output below.';
       }
     } catch (e) {
-      if (e.data && e.data.error === 'daily_cap_reached') {
+      if (e.code === 'unauthenticated') {
+        statusEl.textContent = 'You need to be logged in to generate a draft. Log in (top of page) and try again.';
+      } else if (e.code === 'forbidden') {
+        statusEl.textContent = "You're logged in, but don't have access to generate drafts.";
+      } else if (e.data && e.data.error === 'daily_cap_reached') {
         statusEl.textContent = 'Daily generation cap reached. Try again tomorrow.';
       } else if (e.data && e.data.error === 'ollama_unreachable') {
         statusEl.textContent = 'Could not reach the self-hosted model right now. You can still write the note by hand.';
@@ -119,9 +123,15 @@ async function renderNewNote(container, params) {
       await Api.post('/note', { campaign, path: relPath, frontmatter, body });
       location.hash = `#/campaign?name=${encodeURIComponent(campaign)}`;
     } catch (e) {
-      statusEl.textContent = (e.data && e.data.error === 'file_exists')
-        ? 'A note already exists at that path — change the title or folder.'
-        : 'Could not save note.';
+      if (e.code === 'unauthenticated') {
+        statusEl.textContent = 'You need to be logged in to save notes. Log in (top of page) and try again.';
+      } else if (e.code === 'forbidden') {
+        statusEl.textContent = "You're logged in, but don't have access to save notes.";
+      } else {
+        statusEl.textContent = (e.data && e.data.error === 'file_exists')
+          ? 'A note already exists at that path — change the title or folder.'
+          : 'Could not save note.';
+      }
     }
   });
 }

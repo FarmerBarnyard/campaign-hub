@@ -3,22 +3,34 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 2026-09-02 security review: this repo had no CSP at all before this.
+     img-src needs https://api.barnyard.site (not just 'self') for embedded
+     map images (see lib/wikilink.js's img.src) -- confirmed neither
+     map-dungeon.js nor map-overworld.js ever assigns a data:/blob: URI to
+     an <img> src (canvas.toDataURL() output only ever becomes an <a
+     download> href or a POST body field, never an image src), so neither
+     scheme needs to be in img-src here. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.barnyard.site; style-src 'self'; script-src 'self'; img-src 'self' https://api.barnyard.site; base-uri 'self'; form-action 'none';">
 <title>Campaign Hub</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
 <header class="app-header">
-  <p class="wordmark">Campaign Hub</p>
-  <nav class="app-nav">
-    <a href="#/" class="nav-link">Library</a>
-    <a href="#/map/dungeon" class="nav-link">Dungeon map</a>
-    <a href="#/map/overworld" class="nav-link">Overworld map</a>
-  </nav>
+  <div class="app-header-main">
+    <p class="wordmark">Campaign Hub</p>
+    <nav class="app-nav">
+      <a href="#/" class="nav-link">Library</a>
+      <a href="#/map/dungeon" class="nav-link">Dungeon map</a>
+      <a href="#/map/overworld" class="nav-link">Overworld map</a>
+    </nav>
+  </div>
+  <div class="auth-status" id="auth-status"></div>
 </header>
 
 <main id="app"></main>
 
+<script src="auth-gate.js"></script>
 <script src="lib/api.js"></script>
 <script src="lib/wikilink.js"></script>
 <script src="lib/noise.js"></script>

@@ -26,12 +26,16 @@ a { color: var(--accent-bright); }
 
 .app-header {
   display: flex;
+  justify-content: space-between;
   align-items: baseline;
-  gap: 24px;
+  flex-wrap: wrap;
+  gap: 16px;
   padding: 20px 0;
   border-bottom: 1px solid var(--border);
   margin-bottom: 24px;
 }
+
+.app-header-main { display: flex; align-items: baseline; gap: 24px; }
 
 .wordmark {
   font-size: 1.3rem;
@@ -43,6 +47,16 @@ a { color: var(--accent-bright); }
 .app-nav { display: flex; gap: 16px; }
 .nav-link { color: var(--text-dim); text-decoration: none; font-size: 0.9rem; }
 .nav-link:hover { color: var(--accent-bright); }
+
+/* Login status, top-right of the header -- see auth-gate.js. Same treatment
+   as barnyard-hub/study-hub's own .auth-status (hand-copied file, kept
+   visually consistent by hand, translated to this repo's warm/accent
+   palette instead of theirs). */
+.auth-status { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; white-space: nowrap; }
+.auth-status-label { color: var(--text-dim); }
+.auth-login-link { color: var(--accent-bright); font-weight: 700; }
+.auth-logout-btn { font-size: 0.78rem; padding: 3px 8px; }
+.auth-logout-btn:hover { border-color: var(--accent); }
 
 main { max-width: 900px; margin: 0 auto; }
 
