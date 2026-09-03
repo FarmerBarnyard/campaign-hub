@@ -5,6 +5,7 @@ async function renderLibrary(container) {
     <form id="new-campaign-form" class="inline-form">
       <input id="new-campaign-name" placeholder="New campaign name" required autocomplete="off">
       <button type="submit">Create campaign</button>
+      <span id="new-campaign-status" class="status-text"></span>
     </form>
   `;
 
@@ -38,18 +39,24 @@ async function renderLibrary(container) {
   container.querySelector('#new-campaign-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const nameInput = container.querySelector('#new-campaign-name');
+    const statusEl = container.querySelector('#new-campaign-status');
     const name = nameInput.value.trim();
     if (!name) return;
+    statusEl.textContent = '';
     try {
       await Api.post('/campaigns', { name });
       location.hash = `#/campaign?name=${encodeURIComponent(name)}`;
     } catch (e) {
+      // Inline status text, not alert() -- matches every other gated action
+      // in this codebase (new-note.js's Save/Generate, map-dungeon.js's
+      // Save to campaign), none of which block the page with a native
+      // dialog (2026-09-03 fix).
       if (e.code === 'unauthenticated') {
-        alert('You need to be logged in to create a campaign. Log in (top of page) and try again.');
+        statusEl.textContent = 'You need to be logged in to create a campaign. Log in (top of page) and try again.';
       } else if (e.code === 'forbidden') {
-        alert("You're logged in, but don't have access to create campaigns.");
+        statusEl.textContent = "You're logged in, but don't have access to create campaigns.";
       } else {
-        alert(e.data && e.data.error === 'campaign_exists' ? 'A campaign with that name already exists.' : 'Could not create campaign.');
+        statusEl.textContent = (e.data && e.data.error === 'campaign_exists') ? 'A campaign with that name already exists.' : 'Could not create campaign.';
       }
     }
   });
