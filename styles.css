@@ -60,6 +60,15 @@ a { color: var(--accent-bright); }
 
 main { max-width: 900px; margin: 0 auto; }
 
+/* Map generator pages need more horizontal room than the 900px reading
+   width above -- .map-controls (220px) + gap (20px) + the canvas's own
+   intrinsic width (900px dungeon / 800px overworld) don't fit inside 900px,
+   so the canvas was wrapping onto its own row below a tall controls column
+   and sitting below the fold on a normal-height viewport (2026-09-03 fix --
+   confirmed live: both generators always rendered correctly, this was a
+   pure layout/visibility bug, not a rendering bug). */
+main:has(.map-layout) { max-width: 1200px; }
+
 h2 { font-size: 1.4rem; margin-bottom: 16px; }
 
 .empty-note, .error { color: var(--text-dim); }
