@@ -47,6 +47,27 @@ function wireMapExportSave(container, canvas, prefix) {
   });
 }
 
+// Draws a rectangle's outline as four jittered line segments instead of a
+// perfectly straight strokeRect -- reads as sketchy/hand-inked rather than
+// CAD-precise. Jitter is driven by the caller's rng, so it's part of the
+// same seeded sequence and reproduces identically for a given seed.
+function wobbleStrokeRect(ctx, x, y, w, h, rng, jitter) {
+  const j = () => (rng() - 0.5) * jitter;
+  const corners = [
+    [x + j(), y + j()],
+    [x + w + j(), y + j()],
+    [x + w + j(), y + h + j()],
+    [x + j(), y + h + j()],
+  ];
+  ctx.beginPath();
+  ctx.moveTo(corners[0][0], corners[0][1]);
+  for (let i = 1; i <= 4; i++) {
+    const c = corners[i % 4];
+    ctx.lineTo(c[0], c[1]);
+  }
+  ctx.stroke();
+}
+
 // Dungeon/battle map: BSP tree. Chosen over cellular automata because it
 // guarantees connectivity by construction (every split node wires its two
 // children together) with grid-aligned rooms suited to 5-ft-square D&D maps.
@@ -56,6 +77,7 @@ function renderDungeonMap(container) {
     <div class="map-layout">
       <div class="map-controls">
         <label>Seed <input id="dg-seed" type="number" value="${Math.floor(Math.random() * 1e6)}"></label>
+        <label>Theme <select id="dg-theme"></select></label>
         <label>Grid width (cells) <input id="dg-w" type="number" value="60"></label>
         <label>Grid height (cells) <input id="dg-h" type="number" value="40"></label>
         <label>Min room size <input id="dg-min" type="number" value="6"></label>
@@ -73,6 +95,7 @@ function renderDungeonMap(container) {
   `;
 
   populateCampaignSelect(container.querySelector('#dg-campaign'));
+  populateThemeSelect(container.querySelector('#dg-theme'));
 
   const canvas = container.querySelector('#dg-canvas');
   const ctx = canvas.getContext('2d');
@@ -83,7 +106,13 @@ function renderDungeonMap(container) {
     const gh = parseInt(container.querySelector('#dg-h').value, 10) || 40;
     const minSize = parseInt(container.querySelector('#dg-min').value, 10) || 6;
     const maxDepth = parseInt(container.querySelector('#dg-depth').value, 10) || 5;
+    const theme = MAP_THEMES[container.querySelector('#dg-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
+    const palette = theme.dungeon;
     const rng = mulberry32(seed);
+    // Separate rng for wobble jitter, seeded off the same seed but never
+    // consumed by layout generation -- switching themes (wobble on/off)
+    // must never perturb the room/corridor layout itself.
+    const wobbleRng = mulberry32(seed + 991);
     const cell = Math.min(canvas.width / gw, canvas.height / gh);
 
     // 0 = rock, 1 = room, 2 = corridor
@@ -131,26 +160,32 @@ function renderDungeonMap(container) {
 
     split(0, 0, gw, gh, 0);
 
-    ctx.fillStyle = '#0e0e10';
+    ctx.fillStyle = palette.rock;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
-        if (grid[y][x] === 1) ctx.fillStyle = '#caa96a';
-        else if (grid[y][x] === 2) ctx.fillStyle = '#8a7a54';
+        if (grid[y][x] === 1) ctx.fillStyle = palette.room;
+        else if (grid[y][x] === 2) ctx.fillStyle = palette.corridor;
         else continue;
         ctx.fillRect(x * cell, y * cell, cell, cell);
       }
     }
-    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.strokeStyle = palette.stroke;
     ctx.lineWidth = 1;
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
-        if (grid[y][x] !== 0) ctx.strokeRect(x * cell, y * cell, cell, cell);
+        if (grid[y][x] === 0) continue;
+        if (palette.wobble) {
+          wobbleStrokeRect(ctx, x * cell, y * cell, cell, cell, wobbleRng, Math.max(1, cell * 0.08));
+        } else {
+          ctx.strokeRect(x * cell, y * cell, cell, cell);
+        }
       }
     }
   }
 
   generate();
   container.querySelector('#dg-regen').addEventListener('click', generate);
+  container.querySelector('#dg-theme').addEventListener('change', generate);
   wireMapExportSave(container, canvas, 'dg');
 }
