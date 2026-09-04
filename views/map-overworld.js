@@ -296,6 +296,7 @@ function renderOverworldMap(container) {
         <p id="ow-status" class="status-text"></p>
         <hr>
         <p id="ow-settlement-action" class="status-text"></p>
+        <p id="ow-theme-suggestion" class="status-text"></p>
       </div>
       <canvas id="ow-canvas" width="800" height="600"></canvas>
     </div>
@@ -344,6 +345,7 @@ function renderOverworldMap(container) {
     const nameRng = mulberry32(seed + 33333);
     const riverCurveRng = mulberry32(seed + 11111);
     const regionRng = mulberry32(seed + 22222);
+    const themeSuggestRng = mulberry32(seed + 67890);
 
     const mesh = buildVoronoiMesh(meshRng, canvas.width, canvas.height, cellCount);
 
@@ -455,11 +457,13 @@ function renderOverworldMap(container) {
       ctx.stroke();
     }
 
+    let riverSegmentCount = 0;
     if (riversOn) {
       const avgSpacing = Math.sqrt((canvas.width * canvas.height) / Math.max(1, cellCount));
       ctx.lineCap = 'round';
       for (let i = 0; i < mesh.cells.length; i++) {
         if (downhill[i] === -1 || flow[i] < riverThreshold) continue;
+        riverSegmentCount++;
         const a = mesh.cells[i], b = mesh.cells[downhill[i]];
         ctx.strokeStyle = palette.river;
         ctx.lineWidth = Math.min(6, 1 + Math.sqrt(flow[i] / riverThreshold));
@@ -573,6 +577,39 @@ function renderOverworldMap(container) {
     }
 
     if (legendOn) drawMapLegend(ctx, canvas, palette);
+
+    // Suggested campaign theme: a heuristic read of this specific map's own
+    // statistics (biome mix, settlement tiers, river count, island-ness),
+    // not anything the map's rendering needs -- computed last, purely from
+    // data already on hand.
+    const landBiomeCounts = { plains: 0, forest: 0, hills: 0, mountains: 0, snow: 0 };
+    let beachCount = 0, landCount = 0;
+    for (const { biome } of cellData) {
+      if (biome === 'deepwater' || biome === 'shallowwater') continue;
+      landCount++;
+      if (biome === 'beach') { beachCount++; continue; }
+      if (landBiomeCounts[biome] !== undefined) landBiomeCounts[biome]++;
+    }
+    const landNonBeachCount = Math.max(1, landCount - beachCount);
+    const biomeFraction = {};
+    for (const k in landBiomeCounts) biomeFraction[k] = landBiomeCounts[k] / landNonBeachCount;
+    const tierCounts = { village: 0, town: 0, city: 0 };
+    for (const s of settlements) tierCounts[s.tier]++;
+    const coastalSettlementFraction = settlements.length
+      ? settlements.filter((s) => regionCategory[regionOf[s.index]] === 'coastal').length / settlements.length
+      : 0;
+    const mapStats = {
+      landFraction: landCount / cellData.length,
+      beachFraction: beachCount / cellData.length,
+      biome: biomeFraction,
+      settlementCount: settlements.length,
+      tierCounts,
+      riverCount: riverSegmentCount,
+      islandMode: island,
+      coastalSettlementFraction,
+    };
+    const themeSuggestion = suggestCampaignTheme(mapStats, themeSuggestRng);
+    container.querySelector('#ow-theme-suggestion').textContent = `Suggested campaign theme: ${themeSuggestion}`;
 
     currentSeed = seed;
     currentSettlements = settlements;
