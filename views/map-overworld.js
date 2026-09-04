@@ -141,6 +141,7 @@ function renderOverworldMap(container) {
         <label>Octaves <input id="ow-oct" type="number" value="4" min="1" max="6"></label>
         <label>Sea level <input id="ow-sea" type="range" min="0" max="100" value="42"></label>
         <label><input id="ow-island" type="checkbox" checked> Island mode</label>
+        <label><input id="ow-rivers" type="checkbox" checked> Rivers</label>
         <label>Settlements <input id="ow-settle" type="number" value="6" min="0" max="20"></label>
         <button id="ow-regen">Regenerate</button>
         <hr>
@@ -175,6 +176,7 @@ function renderOverworldMap(container) {
     const octaves = parseInt(container.querySelector('#ow-oct').value, 10) || 4;
     const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
     const island = container.querySelector('#ow-island').checked;
+    const riversOn = container.querySelector('#ow-rivers').checked;
     const settleCount = parseInt(container.querySelector('#ow-settle').value, 10) || 0;
     const theme = MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
     const palette = theme.overworld;
@@ -183,25 +185,60 @@ function renderOverworldMap(container) {
     const heightSample = makeFbmSampler(rng, octaves);
     const moistureSample = makeFbmSampler(mulberry32(seed + 99991), Math.max(1, octaves - 1));
     // Dedicated rngs for every generative concern that must never perturb
-    // another -- mesh geometry, biome texture, settlement names -- kept
-    // separate from `rng` above (terrain) so switching themes, adjusting
-    // cell count, or regenerating never perturbs a different pass's output.
+    // another -- mesh geometry, biome texture, settlement names, river-curve
+    // jitter -- kept separate from `rng` above (terrain) so switching
+    // themes, toggling rivers, or regenerating never perturbs a different
+    // pass's output. River *routing* itself needs no rng (it's a
+    // deterministic function of the height field); only the cosmetic curve
+    // wobble does, matching the dungeon wobble / road-curve precedent.
     const meshRng = mulberry32(seed + 77777);
     const textureRng = mulberry32(seed + 55555);
     const nameRng = mulberry32(seed + 33333);
+    const riverCurveRng = mulberry32(seed + 11111);
 
     const mesh = buildVoronoiMesh(meshRng, canvas.width, canvas.height, cellCount);
 
     const cx = canvas.width / 2, cy = canvas.height / 2;
     const maxD = Math.hypot(cx, cy);
 
-    const cellData = mesh.cells.map((cell) => {
+    // Pipeline order: heights -> flow/rivers -> moisture adjustment ->
+    // biome classification -> settlements. Heights come first because flow
+    // routing needs the full height field; biome classification comes last
+    // (of these four) because river/lake presence bumps moisture, which
+    // must land before biomeAt() runs, not after.
+    const heights = new Float64Array(mesh.cells.length);
+    mesh.cells.forEach((cell, i) => {
       let h = heightSample(cell.x / canvas.width, cell.y / canvas.height);
-      const m = moistureSample(cell.x / canvas.width, cell.y / canvas.height);
       if (island) {
         const d = Math.hypot(cell.x - cx, cell.y - cy) / maxD;
         h *= Math.max(0, 1 - d * d * 1.3);
       }
+      heights[i] = h;
+    });
+
+    let flow = null, downhill = null, isLake = null, riverThreshold = Infinity;
+    // Cells whose own flow qualifies as a river, or their direct neighbors --
+    // both the moisture bump below and the settlement-scoring bonus further
+    // down read this same set, so "near a river" means one consistent thing
+    // everywhere in this generator.
+    const nearRiver = new Float64Array(mesh.cells.length);
+    if (riversOn) {
+      const hydro = computeHydrology(mesh.cells, heights, seaLevel);
+      flow = hydro.flow; downhill = hydro.downhill; isLake = hydro.isLake;
+      const landCells = [];
+      for (let i = 0; i < mesh.cells.length; i++) if (heights[i] >= seaLevel) landCells.push(i);
+      riverThreshold = riverFlowThreshold(flow, landCells, 0.04, 3);
+      for (let i = 0; i < mesh.cells.length; i++) {
+        if (flow[i] < riverThreshold && !isLake[i]) continue;
+        nearRiver[i] = Math.max(nearRiver[i], 1);
+        for (const nb of mesh.cells[i].neighbors) nearRiver[nb] = Math.max(nearRiver[nb], 0.5);
+      }
+    }
+
+    const cellData = mesh.cells.map((cell, i) => {
+      const h = heights[i];
+      let m = moistureSample(cell.x / canvas.width, cell.y / canvas.height);
+      m = Math.min(1, m + nearRiver[i] * 0.3);
       return { cell, h, m, biome: biomeAt(h, m, seaLevel) };
     });
 
@@ -223,11 +260,37 @@ function renderOverworldMap(container) {
       paintBiomeTexture(ctx, biome, cell.x, cell.y, r * 2, r * 2, textureRng, palette.ink);
     }
 
+    if (riversOn) {
+      const avgSpacing = Math.sqrt((canvas.width * canvas.height) / Math.max(1, cellCount));
+      ctx.lineCap = 'round';
+      for (let i = 0; i < mesh.cells.length; i++) {
+        if (downhill[i] === -1 || flow[i] < riverThreshold) continue;
+        const a = mesh.cells[i], b = mesh.cells[downhill[i]];
+        ctx.strokeStyle = palette.river;
+        ctx.lineWidth = Math.min(6, 1 + Math.sqrt(flow[i] / riverThreshold));
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        const midX = (a.x + b.x) / 2 + (riverCurveRng() - 0.5) * avgSpacing * 0.4;
+        const midY = (a.y + b.y) / 2 + (riverCurveRng() - 0.5) * avgSpacing * 0.4;
+        ctx.quadraticCurveTo(midX, midY, b.x, b.y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = palette.lake;
+      for (let i = 0; i < mesh.cells.length; i++) {
+        if (!isLake[i] || flow[i] < 2) continue; // a local minimum with no upstream drainage isn't a meaningful lake
+        const r = Math.max(3, Math.min(10, 2 + Math.sqrt(flow[i])));
+        ctx.beginPath();
+        ctx.arc(mesh.cells[i].x, mesh.cells[i].y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
     const candidates = [];
     for (const { cell, biome } of cellData) {
       if (cell.polygon.length < 3) continue;
       if (biome === 'plains' || biome === 'beach' || biome === 'hills') {
-        candidates.push({ x: cell.x, y: cell.y, score: rng() + (biome === 'plains' ? 0.3 : 0) });
+        const riverBonus = nearRiver[cell.index] > 0 ? 0.25 : 0;
+        candidates.push({ x: cell.x, y: cell.y, score: rng() + (biome === 'plains' ? 0.3 : 0) + riverBonus });
       }
     }
     candidates.sort((a, b) => b.score - a.score);
