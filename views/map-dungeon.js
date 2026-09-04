@@ -17,11 +17,32 @@ function populateCampaignSelect(selectEl) {
   }).catch(() => { });
 }
 
-function wireMapExportSave(container, canvas, prefix) {
+// `renderAtScale` is optional: a callback `(offscreenCtx) => void` that a
+// view supplies to redraw its *current* map onto whatever context it's
+// given, at that context's own coordinate scale. Export/save then use it to
+// render onto a 2x-larger offscreen canvas rather than upscaling the
+// on-screen canvas's raster afterward -- lines, wobble strokes, and text all
+// get genuinely redrawn at the higher pixel density (crisper when
+// printed/zoomed) instead of just being stretched and blurred. Omitting it
+// falls back to exporting the on-screen canvas exactly as before.
+function wireMapExportSave(container, canvas, prefix, renderAtScale) {
+  const EXPORT_SCALE = 2;
+
+  function exportSource() {
+    if (!renderAtScale) return canvas;
+    const off = document.createElement('canvas');
+    off.width = canvas.width * EXPORT_SCALE;
+    off.height = canvas.height * EXPORT_SCALE;
+    const offCtx = off.getContext('2d');
+    offCtx.scale(EXPORT_SCALE, EXPORT_SCALE);
+    renderAtScale(offCtx);
+    return off;
+  }
+
   container.querySelector(`#${prefix}-export`).addEventListener('click', () => {
     const a = document.createElement('a');
     a.download = 'map.png';
-    a.href = canvas.toDataURL('image/png');
+    a.href = exportSource().toDataURL('image/png');
     a.click();
   });
 
@@ -33,7 +54,7 @@ function wireMapExportSave(container, canvas, prefix) {
     if (!filename.endsWith('.png')) filename += '.png';
     if (!campaign) { statusEl.textContent = 'No campaign selected — create one in the Library first.'; return; }
     try {
-      const res = await Api.post('/map/save-image', { campaign, filename, dataUrl: canvas.toDataURL('image/png') });
+      const res = await Api.post('/map/save-image', { campaign, filename, dataUrl: exportSource().toDataURL('image/png') });
       statusEl.textContent = `Saved. Paste ${res.wikilink} into a note to link it.`;
     } catch (e) {
       if (e.code === 'unauthenticated') {
@@ -98,7 +119,10 @@ function renderDungeonMap(container) {
   populateThemeSelect(container.querySelector('#dg-theme'));
 
   const canvas = container.querySelector('#dg-canvas');
-  const ctx = canvas.getContext('2d');
+  // `let`, not `const` -- wireMapExportSave's high-res export temporarily
+  // points this at an offscreen context so the exact same generate() logic
+  // redraws there instead of the on-screen canvas, then restores it.
+  let ctx = canvas.getContext('2d');
 
   function generate() {
     const seed = parseInt(container.querySelector('#dg-seed').value, 10) || 1;
@@ -109,10 +133,13 @@ function renderDungeonMap(container) {
     const theme = MAP_THEMES[container.querySelector('#dg-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
     const palette = theme.dungeon;
     const rng = mulberry32(seed);
-    // Separate rng for wobble jitter, seeded off the same seed but never
-    // consumed by layout generation -- switching themes (wobble on/off)
-    // must never perturb the room/corridor layout itself.
+    // Separate rngs for the two cosmetic-only passes (wobble jitter, rubble
+    // texture), seeded off the same seed but never consumed by layout
+    // generation -- switching themes must never perturb the room/corridor
+    // layout itself, and adding rubble must never shift where the wobble
+    // jitter lands.
     const wobbleRng = mulberry32(seed + 991);
+    const debrisRng = mulberry32(seed + 44444);
     const cell = Math.min(canvas.width / gw, canvas.height / gh);
 
     // 0 = rock, 1 = room, 2 = corridor
@@ -182,10 +209,36 @@ function renderDungeonMap(container) {
         }
       }
     }
+
+    // Light rubble/debris texture inside rooms (not corridors) -- a sparse
+    // scatter of small dots, gated by probability so it reads as clutter
+    // rather than a solid carpet, matching paintBiomeTexture's convention
+    // on the overworld map. Its own dedicated rng stream means toggling
+    // this never perturbs the room/corridor layout above.
+    ctx.fillStyle = palette.stroke;
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        if (grid[y][x] !== 1) continue;
+        if (debrisRng() > 0.12) continue;
+        const px = x * cell + cell * (0.3 + debrisRng() * 0.4);
+        const py = y * cell + cell * (0.3 + debrisRng() * 0.4);
+        const size = Math.max(0.6, cell * 0.06);
+        ctx.globalAlpha = 0.3;
+        ctx.beginPath();
+        ctx.arc(px, py, size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
   }
 
   generate();
   container.querySelector('#dg-regen').addEventListener('click', generate);
   container.querySelector('#dg-theme').addEventListener('change', generate);
-  wireMapExportSave(container, canvas, 'dg');
+  wireMapExportSave(container, canvas, 'dg', (offCtx) => {
+    const prevCtx = ctx;
+    ctx = offCtx;
+    generate();
+    ctx = prevCtx;
+  });
 }

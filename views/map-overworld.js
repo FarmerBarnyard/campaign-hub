@@ -117,8 +117,151 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
   }
 }
 
+// Relative cost of routing a road through each biome -- plains/beach are
+// cheap, forest and hills cost more, mountains and snow cost the most.
+// Water isn't listed because computeRoadPath excludes water cells from the
+// routable graph entirely (roads in this world don't cross open water).
+const OW_TERRAIN_ROAD_COST = { beach: 1.2, plains: 1, forest: 1.3, hills: 2, mountains: 4, snow: 2.5 };
+
+// Dijkstra shortest path over the mesh's cell-adjacency graph, weighted by
+// terrain -- replaces a straight jittered curve between two settlements
+// with a route that actually prefers plains over mountains, and costs
+// extra (not prohibitive) to ford a river without a bridge. A simple
+// linear-scan extract-min rather than a binary heap: the mesh is small
+// enough (at most ~1000 cells) and this only runs once per road, not
+// per frame, so the simpler implementation isn't worth the complexity.
+function computeRoadPath(cells, biomeOf, nearRiverFlag, startIdx, endIdx) {
+  const n = cells.length;
+  const dist = new Float64Array(n).fill(Infinity);
+  const prev = new Int32Array(n).fill(-1);
+  const visited = new Uint8Array(n);
+  dist[startIdx] = 0;
+  for (let iter = 0; iter < n; iter++) {
+    let u = -1, best = Infinity;
+    for (let i = 0; i < n; i++) { if (!visited[i] && dist[i] < best) { best = dist[i]; u = i; } }
+    if (u === -1 || u === endIdx) break;
+    visited[u] = 1;
+    for (const v of cells[u].neighbors) {
+      if (visited[v]) continue;
+      const biome = biomeOf[v];
+      if (biome === 'deepwater' || biome === 'shallowwater') continue;
+      const d = Math.hypot(cells[u].x - cells[v].x, cells[u].y - cells[v].y);
+      const terrainCost = OW_TERRAIN_ROAD_COST[biome] || 1;
+      const riverPenalty = nearRiverFlag[v] > 0 ? 1.5 : 1;
+      const alt = dist[u] + d * terrainCost * riverPenalty;
+      if (alt < dist[v]) { dist[v] = alt; prev[v] = u; }
+    }
+  }
+  if (dist[endIdx] === Infinity) return null;
+  const path = [];
+  let cur = endIdx;
+  while (cur !== -1) { path.push(cur); cur = prev[cur]; }
+  path.reverse();
+  return path;
+}
+
 const OW_TIER_RADIUS = { village: 3.5, town: 5.5, city: 8 };
 const OW_TIER_FONT = { village: '10px sans-serif', town: 'bold 11px sans-serif', city: 'bold 13px sans-serif' };
+
+// Settlement iconography: a distinct glyph per tier instead of one filled
+// circle at three sizes, so tier reads at a glance even without comparing
+// marker sizes against each other. village keeps the plain dot (the
+// smallest/most numerous tier reads fine as a simple point); town becomes a
+// diamond; city becomes a five-pointed star, echoing the classic map-symbol
+// convention for a capital.
+// On-canvas legend: drawn onto the canvas itself (not just the page around
+// it) so it travels with an exported/saved PNG, which is the actual
+// deliverable pasted into notes -- a page-only legend wouldn't. Always the
+// same fixed rows regardless of what's actually present on this particular
+// map (a normal legend convention -- it documents the map's visual
+// language, not an inventory of this map's contents), and deliberately a
+// plain light card regardless of theme, matching how a legend box reads as
+// its own neutral overlay on real maps rather than adopting the map's own
+// palette.
+function drawMapLegend(ctx, canvas, palette) {
+  const rows = [
+    { type: 'swatch', color: palette.biomes.deepwater, label: 'Deep water' },
+    { type: 'swatch', color: palette.biomes.shallowwater, label: 'Shallow water' },
+    { type: 'swatch', color: palette.biomes.beach, label: 'Beach' },
+    { type: 'swatch', color: palette.biomes.plains, label: 'Plains' },
+    { type: 'swatch', color: palette.biomes.forest, label: 'Forest' },
+    { type: 'swatch', color: palette.biomes.hills, label: 'Hills' },
+    { type: 'swatch', color: palette.biomes.mountains, label: 'Mountains' },
+    { type: 'swatch', color: palette.biomes.snow, label: 'Snow' },
+    { type: 'icon', tier: 'village', label: 'Village' },
+    { type: 'icon', tier: 'town', label: 'Town' },
+    { type: 'icon', tier: 'city', label: 'City' },
+    { type: 'line', color: palette.river, label: 'River' },
+    { type: 'line', color: palette.coastline, label: 'Coastline' },
+    { type: 'line', color: palette.road, label: 'Road' },
+  ];
+  const rowH = 15, padding = 10, swatchSize = 11;
+  const boxWidth = 130;
+  const boxHeight = rows.length * rowH + padding * 2;
+  const boxX = padding, boxY = canvas.height - boxHeight - padding;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillRect(boxX, boxY, boxWidth, boxHeight);
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
+
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+
+  rows.forEach((row, i) => {
+    const rowY = boxY + padding + i * rowH + rowH / 2;
+    const iconX = boxX + padding + swatchSize / 2;
+    if (row.type === 'swatch') {
+      ctx.fillStyle = row.color;
+      ctx.fillRect(iconX - swatchSize / 2, rowY - swatchSize / 2, swatchSize, swatchSize);
+    } else if (row.type === 'icon') {
+      ctx.fillStyle = '#333333';
+      drawSettlementIcon(ctx, row.tier, iconX, rowY, swatchSize * 0.4);
+    } else if (row.type === 'line') {
+      ctx.strokeStyle = row.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(iconX - swatchSize / 2, rowY);
+      ctx.lineTo(iconX + swatchSize / 2, rowY);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillText(row.label, boxX + padding + swatchSize + 6, rowY);
+  });
+  ctx.restore();
+}
+
+function drawSettlementIcon(ctx, tier, cx, cy, r) {
+  if (tier === 'town') {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - r);
+    ctx.lineTo(cx + r, cy);
+    ctx.lineTo(cx, cy + r);
+    ctx.lineTo(cx - r, cy);
+    ctx.closePath();
+    ctx.fill();
+    return;
+  }
+  if (tier === 'city') {
+    const points = 5, innerR = r * 0.45;
+    ctx.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const rad = i % 2 === 0 ? r : innerR;
+      const angle = (Math.PI / points) * i - Math.PI / 2;
+      const x = cx + Math.cos(angle) * rad, y = cy + Math.sin(angle) * rad;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    return;
+  }
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+}
 
 // Overworld/region map: a hand-rolled Voronoi mesh (lib/voronoi-mesh.js)
 // gives irregular polygon cells instead of a uniform grid; height/moisture
@@ -142,6 +285,7 @@ function renderOverworldMap(container) {
         <label>Sea level <input id="ow-sea" type="range" min="0" max="100" value="42"></label>
         <label><input id="ow-island" type="checkbox" checked> Island mode</label>
         <label><input id="ow-rivers" type="checkbox" checked> Rivers</label>
+        <label><input id="ow-legend" type="checkbox"> Show legend</label>
         <label>Settlements <input id="ow-settle" type="number" value="6" min="0" max="20"></label>
         <button id="ow-regen">Regenerate</button>
         <hr>
@@ -161,7 +305,10 @@ function renderOverworldMap(container) {
   populateThemeSelect(container.querySelector('#ow-theme'));
 
   const canvas = container.querySelector('#ow-canvas');
-  const ctx = canvas.getContext('2d');
+  // `let`, not `const` -- wireMapExportSave's high-res export temporarily
+  // points this at an offscreen context so generate() redraws there instead
+  // of the on-screen canvas, then restores it.
+  let ctx = canvas.getContext('2d');
 
   // Retained across generate() calls so the click handler below (registered
   // once) can always hit-test against the settlements from the MOST RECENT
@@ -177,6 +324,7 @@ function renderOverworldMap(container) {
     const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
     const island = container.querySelector('#ow-island').checked;
     const riversOn = container.querySelector('#ow-rivers').checked;
+    const legendOn = container.querySelector('#ow-legend').checked;
     const settleCount = parseInt(container.querySelector('#ow-settle').value, 10) || 0;
     const theme = MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
     const palette = theme.overworld;
@@ -363,13 +511,17 @@ function renderOverworldMap(container) {
       s.name = generateSettlementName(nameRng, s.tier, regionCategory[regionOf[s.index]]);
     });
 
-    // Road curve wobble scales with average cell spacing rather than a
-    // fixed pixel constant, so it stays visually proportional regardless of
-    // cell count or canvas size.
-    const avgSpacing = Math.sqrt((canvas.width * canvas.height) / Math.max(1, cellCount));
+    // Roads: which settlement pairs to connect still comes from a simple
+    // nearest-neighbor MST over straight-line distance (a reasonable, cheap
+    // heuristic for "does a road exist between these two places" -- real
+    // road *networks* aren't full shortest-path meshes either). What
+    // changed is how each chosen connection is drawn: instead of a single
+    // jittered curve, it's an actual Dijkstra route over the mesh that
+    // prefers plains/beach and avoids mountains and open water.
     ctx.strokeStyle = palette.road;
     ctx.lineWidth = 2;
     if (settlements.length > 1) {
+      const biomeOf = cellData.map((d) => d.biome);
       const connected = new Set([0]);
       while (connected.size < settlements.length) {
         let best = null;
@@ -382,11 +534,20 @@ function renderOverworldMap(container) {
         }
         if (!best) break;
         const a = settlements[best.i], b = settlements[best.j];
+        const path = computeRoadPath(mesh.cells, biomeOf, nearRiver, a.index, b.index);
         ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        const midX = (a.x + b.x) / 2 + (rng() - 0.5) * avgSpacing * 0.5;
-        const midY = (a.y + b.y) / 2 + (rng() - 0.5) * avgSpacing * 0.5;
-        ctx.quadraticCurveTo(midX, midY, b.x, b.y);
+        if (path && path.length > 1) {
+          const pts = path.map((idx) => ({ x: mesh.cells[idx].x, y: mesh.cells[idx].y }));
+          const smoothed = pts.length > 2 ? chaikinSmooth(pts, 1) : pts;
+          ctx.moveTo(smoothed[0].x, smoothed[0].y);
+          for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
+        } else {
+          // No routable land path (e.g. the two settlements are on
+          // separate islands) -- fall back to a direct line so a
+          // connection still gets drawn rather than silently vanishing.
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+        }
         ctx.stroke();
         connected.add(best.j);
       }
@@ -396,9 +557,7 @@ function renderOverworldMap(container) {
       const px = s.x, py = s.y;
       const r = OW_TIER_RADIUS[s.tier];
       ctx.fillStyle = palette.settlement[s.tier];
-      ctx.beginPath();
-      ctx.arc(px, py, r, 0, Math.PI * 2);
-      ctx.fill();
+      drawSettlementIcon(ctx, s.tier, px, py, r);
       if (s.tier === 'city') {
         ctx.strokeStyle = palette.settlement[s.tier];
         ctx.lineWidth = 1.5;
@@ -412,6 +571,8 @@ function renderOverworldMap(container) {
       ctx.textBaseline = 'top';
       ctx.fillText(s.name, px, py + r + 3);
     }
+
+    if (legendOn) drawMapLegend(ctx, canvas, palette);
 
     currentSeed = seed;
     currentSettlements = settlements;
@@ -460,5 +621,10 @@ function renderOverworldMap(container) {
   generate();
   container.querySelector('#ow-regen').addEventListener('click', generate);
   container.querySelector('#ow-theme').addEventListener('change', generate);
-  wireMapExportSave(container, canvas, 'ow');
+  wireMapExportSave(container, canvas, 'ow', (offCtx) => {
+    const prevCtx = ctx;
+    ctx = offCtx;
+    generate();
+    ctx = prevCtx;
+  });
 }

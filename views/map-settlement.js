@@ -55,7 +55,10 @@ function renderSettlementMap(container, params) {
   populateThemeSelect(container.querySelector('#st-theme'));
 
   const canvas = container.querySelector('#st-canvas');
-  const ctx = canvas.getContext('2d');
+  // `let`, not `const` -- wireMapExportSave's high-res export temporarily
+  // points this at an offscreen context so generate() redraws there instead
+  // of the on-screen canvas, then restores it.
+  let ctx = canvas.getContext('2d');
 
   function generate() {
     const theme = MAP_THEMES[container.querySelector('#st-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
@@ -195,5 +198,10 @@ function renderSettlementMap(container, params) {
 
   generate();
   container.querySelector('#st-theme').addEventListener('change', generate);
-  wireMapExportSave(container, canvas, 'st');
+  wireMapExportSave(container, canvas, 'st', (offCtx) => {
+    const prevCtx = ctx;
+    ctx = offCtx;
+    generate();
+    ctx = prevCtx;
+  });
 }
