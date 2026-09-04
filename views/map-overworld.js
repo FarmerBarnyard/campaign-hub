@@ -117,12 +117,16 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
   }
 }
 
-// Overworld/region map: value-noise heightmap (fbm), biome bands, settlements
-// placed by scoring settleable cells with a min-distance filter, roads via a
-// nearest-neighbor MST approximation. Settlement tiers and biome texture are
-// purely cosmetic passes over that same data -- neither perturbs the
-// underlying generation, so a given seed still reproduces the same land
-// shape/settlement positions across themes and re-generates.
+// Overworld/region map: a hand-rolled Voronoi mesh (lib/voronoi-mesh.js)
+// gives irregular polygon cells instead of a uniform grid; height/moisture
+// are sampled continuously (lib/noise.js's makeFbmSampler) at each cell's
+// site rather than baked into a raster. Biome classification, settlement
+// placement (scoring + min-distance filter), and roads (nearest-neighbor
+// MST) work exactly as before, just against polygon-cell data instead of
+// grid-index data. Settlement tiers and biome texture are purely cosmetic
+// passes over that same data -- neither perturbs the underlying generation,
+// so a given seed still reproduces the same land shape/settlement positions
+// across themes and re-generates.
 function renderOverworldMap(container) {
   container.innerHTML = `
     <h2>Overworld map generator</h2>
@@ -130,8 +134,7 @@ function renderOverworldMap(container) {
       <div class="map-controls">
         <label>Seed <input id="ow-seed" type="number" value="${Math.floor(Math.random() * 1e6)}"></label>
         <label>Theme <select id="ow-theme"></select></label>
-        <label>Width (cells) <input id="ow-w" type="number" value="80"></label>
-        <label>Height (cells) <input id="ow-h" type="number" value="60"></label>
+        <label>Cells <input id="ow-cells" type="number" value="400" min="50" max="1000"></label>
         <label>Octaves <input id="ow-oct" type="number" value="4" min="1" max="6"></label>
         <label>Sea level <input id="ow-sea" type="range" min="0" max="100" value="42"></label>
         <label><input id="ow-island" type="checkbox" checked> Island mode</label>
@@ -156,8 +159,7 @@ function renderOverworldMap(container) {
 
   function generate() {
     const seed = parseInt(container.querySelector('#ow-seed').value, 10) || 1;
-    const gw = parseInt(container.querySelector('#ow-w').value, 10) || 80;
-    const gh = parseInt(container.querySelector('#ow-h').value, 10) || 60;
+    const cellCount = parseInt(container.querySelector('#ow-cells').value, 10) || 400;
     const octaves = parseInt(container.querySelector('#ow-oct').value, 10) || 4;
     const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
     const island = container.querySelector('#ow-island').checked;
@@ -166,51 +168,58 @@ function renderOverworldMap(container) {
     const palette = theme.overworld;
 
     const rng = mulberry32(seed);
-    const height = fbm(rng, gw, gh, octaves);
-    const moisture = fbm(mulberry32(seed + 99991), gw, gh, Math.max(1, octaves - 1));
-    // Dedicated rngs for the two cosmetic-only passes (biome texture,
-    // settlement names) -- kept separate from `rng` above so switching
-    // themes or regenerating never perturbs terrain/settlement placement,
-    // and separate from each other so texture density doesn't shift names.
+    const heightSample = makeFbmSampler(rng, octaves);
+    const moistureSample = makeFbmSampler(mulberry32(seed + 99991), Math.max(1, octaves - 1));
+    // Dedicated rngs for every generative concern that must never perturb
+    // another -- mesh geometry, biome texture, settlement names -- kept
+    // separate from `rng` above (terrain) so switching themes, adjusting
+    // cell count, or regenerating never perturbs a different pass's output.
+    const meshRng = mulberry32(seed + 77777);
     const textureRng = mulberry32(seed + 55555);
     const nameRng = mulberry32(seed + 33333);
 
-    if (island) {
-      const cx = gw / 2, cy = gh / 2;
-      const maxD = Math.sqrt(cx * cx + cy * cy);
-      for (let y = 0; y < gh; y++) {
-        for (let x = 0; x < gw; x++) {
-          const d = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2) / maxD;
-          height[y][x] *= Math.max(0, 1 - d * d * 1.3);
-        }
-      }
-    }
+    const mesh = buildVoronoiMesh(meshRng, canvas.width, canvas.height, cellCount);
 
-    const cellW = canvas.width / gw, cellH = canvas.height / gh;
-    const biomes = [];
-    for (let y = 0; y < gh; y++) {
-      const row = [];
-      for (let x = 0; x < gw; x++) {
-        const b = biomeAt(height[y][x], moisture[y][x], seaLevel);
-        row.push(b);
-        ctx.fillStyle = palette.biomes[b];
-        ctx.fillRect(x * cellW, y * cellH, cellW + 1, cellH + 1);
-        paintBiomeTexture(ctx, b, x * cellW + cellW / 2, y * cellH + cellH / 2, cellW, cellH, textureRng, palette.ink);
+    const cx = canvas.width / 2, cy = canvas.height / 2;
+    const maxD = Math.hypot(cx, cy);
+
+    const cellData = mesh.cells.map((cell) => {
+      let h = heightSample(cell.x / canvas.width, cell.y / canvas.height);
+      const m = moistureSample(cell.x / canvas.width, cell.y / canvas.height);
+      if (island) {
+        const d = Math.hypot(cell.x - cx, cell.y - cy) / maxD;
+        h *= Math.max(0, 1 - d * d * 1.3);
       }
-      biomes.push(row);
+      return { cell, h, m, biome: biomeAt(h, m, seaLevel) };
+    });
+
+    for (const { cell, biome } of cellData) {
+      const poly = cell.polygon;
+      if (poly.length < 3) continue;
+      ctx.beginPath();
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+      ctx.closePath();
+      ctx.fillStyle = palette.biomes[biome];
+      ctx.fill();
+      // Stroking in the fill's own color papers over hairline seams
+      // between adjacent polygons that floating-point clipping can leave.
+      ctx.strokeStyle = palette.biomes[biome];
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      const r = Math.sqrt(polygonArea(poly) / Math.PI);
+      paintBiomeTexture(ctx, biome, cell.x, cell.y, r * 2, r * 2, textureRng, palette.ink);
     }
 
     const candidates = [];
-    for (let y = 1; y < gh - 1; y++) {
-      for (let x = 1; x < gw - 1; x++) {
-        const b = biomes[y][x];
-        if (b === 'plains' || b === 'beach' || b === 'hills') {
-          candidates.push({ x, y, score: rng() + (b === 'plains' ? 0.3 : 0) });
-        }
+    for (const { cell, biome } of cellData) {
+      if (cell.polygon.length < 3) continue;
+      if (biome === 'plains' || biome === 'beach' || biome === 'hills') {
+        candidates.push({ x: cell.x, y: cell.y, score: rng() + (biome === 'plains' ? 0.3 : 0) });
       }
     }
     candidates.sort((a, b) => b.score - a.score);
-    const minDist = Math.max(gw, gh) / (settleCount + 1) * 0.6;
+    const minDist = Math.max(canvas.width, canvas.height) / (settleCount + 1) * 0.6;
     const settlements = [];
     for (const c of candidates) {
       if (settlements.length >= settleCount) break;
@@ -232,6 +241,10 @@ function renderOverworldMap(container) {
       s.name = generateSettlementName(nameRng, s.tier);
     });
 
+    // Road curve wobble scales with average cell spacing rather than a
+    // fixed pixel constant, so it stays visually proportional regardless of
+    // cell count or canvas size.
+    const avgSpacing = Math.sqrt((canvas.width * canvas.height) / Math.max(1, cellCount));
     ctx.strokeStyle = palette.road;
     ctx.lineWidth = 2;
     if (settlements.length > 1) {
@@ -248,10 +261,10 @@ function renderOverworldMap(container) {
         if (!best) break;
         const a = settlements[best.i], b = settlements[best.j];
         ctx.beginPath();
-        ctx.moveTo(a.x * cellW, a.y * cellH);
-        const midX = (a.x + b.x) / 2 + (rng() - 0.5) * 4;
-        const midY = (a.y + b.y) / 2 + (rng() - 0.5) * 4;
-        ctx.quadraticCurveTo(midX * cellW, midY * cellH, b.x * cellW, b.y * cellH);
+        ctx.moveTo(a.x, a.y);
+        const midX = (a.x + b.x) / 2 + (rng() - 0.5) * avgSpacing * 0.5;
+        const midY = (a.y + b.y) / 2 + (rng() - 0.5) * avgSpacing * 0.5;
+        ctx.quadraticCurveTo(midX, midY, b.x, b.y);
         ctx.stroke();
         connected.add(best.j);
       }
@@ -260,7 +273,7 @@ function renderOverworldMap(container) {
     const TIER_RADIUS = { village: 3.5, town: 5.5, city: 8 };
     const TIER_FONT = { village: '10px sans-serif', town: 'bold 11px sans-serif', city: 'bold 13px sans-serif' };
     for (const s of settlements) {
-      const px = s.x * cellW, py = s.y * cellH;
+      const px = s.x, py = s.y;
       const r = TIER_RADIUS[s.tier];
       ctx.fillStyle = palette.settlement[s.tier];
       ctx.beginPath();
