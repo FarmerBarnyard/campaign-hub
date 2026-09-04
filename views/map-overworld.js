@@ -195,8 +195,18 @@ function renderOverworldMap(container) {
     const textureRng = mulberry32(seed + 55555);
     const nameRng = mulberry32(seed + 33333);
     const riverCurveRng = mulberry32(seed + 11111);
+    const regionRng = mulberry32(seed + 22222);
 
     const mesh = buildVoronoiMesh(meshRng, canvas.width, canvas.height, cellCount);
+
+    // Naming regions: a handful of flood-filled zones over the same
+    // adjacency graph, each biased toward one phoneme "flavor" once its
+    // dominant biome is known below. Built now (region membership only
+    // needs the adjacency graph, not biome/height data) but not resolved to
+    // an actual phoneme category per region until the biome tally after
+    // cellData exists.
+    const regionCount = Math.max(2, Math.min(8, Math.round(cellCount / 60)));
+    const regionOf = assignNamingRegions(mesh.cells, regionCount, regionRng);
 
     const cx = canvas.width / 2, cy = canvas.height / 2;
     const maxD = Math.hypot(cx, cy);
@@ -240,6 +250,24 @@ function renderOverworldMap(container) {
       let m = moistureSample(cell.x / canvas.width, cell.y / canvas.height);
       m = Math.min(1, m + nearRiver[i] * 0.3);
       return { cell, h, m, biome: biomeAt(h, m, seaLevel) };
+    });
+
+    // Resolve each naming region to a phoneme category by tallying its
+    // cells' biomes and taking the majority -- a mountain-heavy region
+    // reads harsher, a coastal one reads watery, purely from word choice.
+    const regionBiomeTally = [];
+    for (let r = 0; r < regionCount; r++) regionBiomeTally.push({});
+    for (const { cell, biome } of cellData) {
+      const tally = regionBiomeTally[regionOf[cell.index]];
+      const category = BIOME_TO_NAME_CATEGORY[biome] || 'plains';
+      tally[category] = (tally[category] || 0) + 1;
+    }
+    const regionCategory = regionBiomeTally.map((tally) => {
+      let best = 'plains', bestCount = -1;
+      for (const category in tally) {
+        if (tally[category] > bestCount) { bestCount = tally[category]; best = category; }
+      }
+      return best;
     });
 
     for (const { cell, biome } of cellData) {
@@ -309,7 +337,7 @@ function renderOverworldMap(container) {
       if (cell.polygon.length < 3) continue;
       if (biome === 'plains' || biome === 'beach' || biome === 'hills') {
         const riverBonus = nearRiver[cell.index] > 0 ? 0.25 : 0;
-        candidates.push({ x: cell.x, y: cell.y, score: rng() + (biome === 'plains' ? 0.3 : 0) + riverBonus });
+        candidates.push({ x: cell.x, y: cell.y, index: cell.index, score: rng() + (biome === 'plains' ? 0.3 : 0) + riverBonus });
       }
     }
     candidates.sort((a, b) => b.score - a.score);
@@ -332,7 +360,7 @@ function renderOverworldMap(container) {
     const townCount = Math.max(0, Math.round(byScore.length * 0.35));
     byScore.forEach((s, i) => {
       s.tier = i < cityCount ? 'city' : i < cityCount + townCount ? 'town' : 'village';
-      s.name = generateSettlementName(nameRng, s.tier);
+      s.name = generateSettlementName(nameRng, s.tier, regionCategory[regionOf[s.index]]);
     });
 
     // Road curve wobble scales with average cell spacing rather than a
