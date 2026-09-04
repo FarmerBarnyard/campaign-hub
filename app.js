@@ -4,6 +4,7 @@ const routes = {
   'new-note': renderNewNote,
   'map/dungeon': renderDungeonMap,
   'map/overworld': renderOverworldMap,
+  'map/settlement': renderSettlementMap,
 };
 
 function parseHash() {

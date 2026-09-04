@@ -117,6 +117,9 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
   }
 }
 
+const OW_TIER_RADIUS = { village: 3.5, town: 5.5, city: 8 };
+const OW_TIER_FONT = { village: '10px sans-serif', town: 'bold 11px sans-serif', city: 'bold 13px sans-serif' };
+
 // Overworld/region map: a hand-rolled Voronoi mesh (lib/voronoi-mesh.js)
 // gives irregular polygon cells instead of a uniform grid; height/moisture
 // are sampled continuously (lib/noise.js's makeFbmSampler) at each cell's
@@ -146,6 +149,8 @@ function renderOverworldMap(container) {
         <label>Campaign <select id="ow-campaign"></select></label>
         <button id="ow-save">Save to campaign</button>
         <p id="ow-status" class="status-text"></p>
+        <hr>
+        <p id="ow-settlement-action" class="status-text"></p>
       </div>
       <canvas id="ow-canvas" width="800" height="600"></canvas>
     </div>
@@ -156,6 +161,13 @@ function renderOverworldMap(container) {
 
   const canvas = container.querySelector('#ow-canvas');
   const ctx = canvas.getContext('2d');
+
+  // Retained across generate() calls so the click handler below (registered
+  // once) can always hit-test against the settlements from the MOST RECENT
+  // draw -- canvas has no native per-shape click events, so hit-testing has
+  // to work from this remembered screen-position list rather than the DOM.
+  let currentSeed = 0;
+  let currentSettlements = [];
 
   function generate() {
     const seed = parseInt(container.querySelector('#ow-seed').value, 10) || 1;
@@ -270,11 +282,9 @@ function renderOverworldMap(container) {
       }
     }
 
-    const TIER_RADIUS = { village: 3.5, town: 5.5, city: 8 };
-    const TIER_FONT = { village: '10px sans-serif', town: 'bold 11px sans-serif', city: 'bold 13px sans-serif' };
     for (const s of settlements) {
       const px = s.x, py = s.y;
-      const r = TIER_RADIUS[s.tier];
+      const r = OW_TIER_RADIUS[s.tier];
       ctx.fillStyle = palette.settlement[s.tier];
       ctx.beginPath();
       ctx.arc(px, py, r, 0, Math.PI * 2);
@@ -286,13 +296,56 @@ function renderOverworldMap(container) {
         ctx.arc(px, py, r + 3, 0, Math.PI * 2);
         ctx.stroke();
       }
-      ctx.font = TIER_FONT[s.tier];
+      ctx.font = OW_TIER_FONT[s.tier];
       ctx.fillStyle = palette.label;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText(s.name, px, py + r + 3);
     }
+
+    currentSeed = seed;
+    currentSettlements = settlements;
+    container.querySelector('#ow-settlement-action').innerHTML = '';
   }
+
+  // Canvas has no native per-shape click events, so hit-testing is manual:
+  // convert the click point from CSS pixels to the canvas's own internal
+  // resolution (max-width:100% can scale the element down from its 800x600
+  // backing store on a narrow viewport, so offsetX/offsetY alone would be
+  // wrong there) and compare against each settlement's last-drawn position.
+  function canvasToInternal(evt) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
+  }
+  function hitTestSettlement(evt) {
+    const { x, y } = canvasToInternal(evt);
+    let best = null, bestIdx = -1, bestDist = Infinity;
+    currentSettlements.forEach((s, i) => {
+      const r = OW_TIER_RADIUS[s.tier] + 6; // a little padding makes small village markers easier to hit
+      const d = Math.hypot(s.x - x, s.y - y);
+      if (d <= r && d < bestDist) { best = s; bestIdx = i; bestDist = d; }
+    });
+    return best ? { settlement: best, idx: bestIdx } : null;
+  }
+  canvas.addEventListener('mousemove', (evt) => {
+    canvas.style.cursor = hitTestSettlement(evt) ? 'pointer' : 'default';
+  });
+  canvas.addEventListener('click', (evt) => {
+    const hit = hitTestSettlement(evt);
+    const actionEl = container.querySelector('#ow-settlement-action');
+    actionEl.innerHTML = '';
+    if (!hit) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = `Generate town map for ${hit.settlement.name} →`;
+    btn.addEventListener('click', () => {
+      const url = `#/map/settlement?seed=${currentSeed}&idx=${hit.idx}&name=${encodeURIComponent(hit.settlement.name)}&tier=${hit.settlement.tier}`;
+      location.hash = url;
+    });
+    actionEl.appendChild(btn);
+  });
 
   generate();
   container.querySelector('#ow-regen').addEventListener('click', generate);
