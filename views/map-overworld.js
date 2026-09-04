@@ -260,6 +260,25 @@ function renderOverworldMap(container) {
       paintBiomeTexture(ctx, biome, cell.x, cell.y, r * 2, r * 2, textureRng, palette.ink);
     }
 
+    // Coastline smoothing: interior biome-to-biome boundaries deliberately
+    // stay hard polygon edges (that's the visual language of this map, not
+    // a bug) -- only the land/water boundary gets the extra-ink Chaikin
+    // treatment, since that's the one edge worth reading as a coastline
+    // rather than a biome seam. Pure deterministic post-process over
+    // already-generated points, so it carries no rng/seed risk at all.
+    const isLand = (i) => heights[i] >= seaLevel;
+    const coastChains = extractCoastlineChains(mesh.cells, isLand);
+    ctx.strokeStyle = palette.coastline;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = 'round';
+    for (const chain of coastChains) {
+      const smoothed = chaikinSmooth(chain, 2);
+      ctx.beginPath();
+      ctx.moveTo(smoothed[0].x, smoothed[0].y);
+      for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
+      ctx.stroke();
+    }
+
     if (riversOn) {
       const avgSpacing = Math.sqrt((canvas.width * canvas.height) / Math.max(1, cellCount));
       ctx.lineCap = 'round';
