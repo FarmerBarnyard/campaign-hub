@@ -1,11 +1,24 @@
-function biomeAt(h, moist, seaLevel) {
+// forestBias/ruggedBias let the live Vegetation/Ruggedness sliders (Phase 9)
+// shift the moisture and height thresholds without touching the height or
+// moisture fields themselves -- the terrain's actual shape never changes,
+// only where the biome lines fall on it. Thresholds are floored relative to
+// each other (and to seaLevel) rather than shifted freely, so a slider
+// dragged to its extreme can never invert or collapse the ordering into a
+// degenerate all-one-biome map.
+function biomeAt(h, moist, seaLevel, forestBias, ruggedBias) {
+  forestBias = forestBias || 0;
+  ruggedBias = ruggedBias || 0;
   if (h < seaLevel - 0.08) return 'deepwater';
   if (h < seaLevel) return 'shallowwater';
   if (h < seaLevel + 0.03) return 'beach';
-  if (h > 0.85) return 'snow';
-  if (h > 0.7) return 'mountains';
-  if (h > 0.55) return 'hills';
-  if (moist > 0.5) return 'forest';
+  const hillsT = Math.max(seaLevel + 0.08, 0.55 - ruggedBias);
+  const mountainsT = Math.max(hillsT + 0.05, 0.7 - ruggedBias);
+  const snowT = Math.max(mountainsT + 0.05, 0.85 - ruggedBias);
+  if (h > snowT) return 'snow';
+  if (h > mountainsT) return 'mountains';
+  if (h > hillsT) return 'hills';
+  const forestT = Math.min(0.9, Math.max(0.1, 0.5 - forestBias));
+  if (moist > forestT) return 'forest';
   return 'plains';
 }
 
@@ -283,6 +296,8 @@ function renderOverworldMap(container) {
         <label>Cells <input id="ow-cells" type="number" value="400" min="50" max="1000"></label>
         <label>Octaves <input id="ow-oct" type="number" value="4" min="1" max="6"></label>
         <label>Sea level <input id="ow-sea" type="range" min="0" max="100" value="42"></label>
+        <label>Vegetation <input id="ow-forest-bias" type="range" min="-40" max="40" value="0"></label>
+        <label>Ruggedness <input id="ow-rugged-bias" type="range" min="-20" max="20" value="0"></label>
         <label><input id="ow-island" type="checkbox" checked> Island mode</label>
         <label><input id="ow-rivers" type="checkbox" checked> Rivers</label>
         <label><input id="ow-legend" type="checkbox"> Show legend</label>
@@ -323,6 +338,8 @@ function renderOverworldMap(container) {
     const cellCount = parseInt(container.querySelector('#ow-cells').value, 10) || 400;
     const octaves = parseInt(container.querySelector('#ow-oct').value, 10) || 4;
     const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
+    const forestBias = parseInt(container.querySelector('#ow-forest-bias').value, 10) / 100;
+    const ruggedBias = parseInt(container.querySelector('#ow-rugged-bias').value, 10) / 100;
     const island = container.querySelector('#ow-island').checked;
     const riversOn = container.querySelector('#ow-rivers').checked;
     const legendOn = container.querySelector('#ow-legend').checked;
@@ -395,21 +412,35 @@ function renderOverworldMap(container) {
       }
     }
 
+    // `biome` is the LIVE classification (Vegetation/Ruggedness sliders
+    // applied) used for the actual fill colors/texture/legend/theme-
+    // suggestion stats below. `refBiome` is always the *unbiased* (bias=0)
+    // classification -- settlement placement, naming regions, and road
+    // routing all key off refBiome instead, so dragging a slider only
+    // repaints the terrain's coloring and never moves a settlement, renames
+    // a region, or reroutes a road. Height/moisture themselves never change
+    // either way -- only which biome label a given (h, m) pair maps to.
     const cellData = mesh.cells.map((cell, i) => {
       const h = heights[i];
       let m = moistureSample(cell.x / canvas.width, cell.y / canvas.height);
       m = Math.min(1, m + nearRiver[i] * 0.3);
-      return { cell, h, m, biome: biomeAt(h, m, seaLevel) };
+      return {
+        cell, h, m,
+        biome: biomeAt(h, m, seaLevel, forestBias, ruggedBias),
+        refBiome: biomeAt(h, m, seaLevel, 0, 0),
+      };
     });
 
     // Resolve each naming region to a phoneme category by tallying its
     // cells' biomes and taking the majority -- a mountain-heavy region
     // reads harsher, a coastal one reads watery, purely from word choice.
+    // Uses refBiome so a region's name-flavor stays fixed as the sliders
+    // above sculpt the displayed terrain.
     const regionBiomeTally = [];
     for (let r = 0; r < regionCount; r++) regionBiomeTally.push({});
-    for (const { cell, biome } of cellData) {
+    for (const { cell, refBiome } of cellData) {
       const tally = regionBiomeTally[regionOf[cell.index]];
-      const category = BIOME_TO_NAME_CATEGORY[biome] || 'plains';
+      const category = BIOME_TO_NAME_CATEGORY[refBiome] || 'plains';
       tally[category] = (tally[category] || 0) + 1;
     }
     const regionCategory = regionBiomeTally.map((tally) => {
@@ -484,12 +515,16 @@ function renderOverworldMap(container) {
       }
     }
 
+    // Uses refBiome (not the live-biased biome) so settlement placement
+    // itself -- which cells qualify, their scores, their count -- never
+    // shifts as the Vegetation/Ruggedness sliders move, matching Phase 9's
+    // "sculpt without losing what's already settled" requirement.
     const candidates = [];
-    for (const { cell, biome } of cellData) {
+    for (const { cell, refBiome } of cellData) {
       if (cell.polygon.length < 3) continue;
-      if (biome === 'plains' || biome === 'beach' || biome === 'hills') {
+      if (refBiome === 'plains' || refBiome === 'beach' || refBiome === 'hills') {
         const riverBonus = nearRiver[cell.index] > 0 ? 0.25 : 0;
-        candidates.push({ x: cell.x, y: cell.y, index: cell.index, score: rng() + (biome === 'plains' ? 0.3 : 0) + riverBonus });
+        candidates.push({ x: cell.x, y: cell.y, index: cell.index, score: rng() + (refBiome === 'plains' ? 0.3 : 0) + riverBonus });
       }
     }
     candidates.sort((a, b) => b.score - a.score);
@@ -525,7 +560,10 @@ function renderOverworldMap(container) {
     ctx.strokeStyle = palette.road;
     ctx.lineWidth = 2;
     if (settlements.length > 1) {
-      const biomeOf = cellData.map((d) => d.biome);
+      // Also refBiome -- roads shouldn't visibly reroute every time the
+      // Vegetation/Ruggedness sliders move, since they were built for the
+      // terrain as it was when the settlements themselves were placed.
+      const biomeOf = cellData.map((d) => d.refBiome);
       const connected = new Set([0]);
       while (connected.size < settlements.length) {
         let best = null;
@@ -655,9 +693,39 @@ function renderOverworldMap(container) {
     actionEl.appendChild(btn);
   });
 
+  // Unlike every other control here (which only takes effect on the next
+  // Regenerate/theme change), the bias sliders redraw live on every drag
+  // tick -- instant feedback is the actual point of a "sculpt this
+  // terrain" control, and it's safe to do live because biomeAt() is a
+  // cheap reclassification of already-computed height/moisture, not a
+  // re-roll of the mesh/heightmap/settlements. But a full generate() still
+  // costs ~50ms at the default 400 cells and ~300ms at the 1000-cell
+  // ceiling (measured) -- a slider can fire input events faster than that,
+  // so naive per-event redraw would queue up a growing backlog at high
+  // cell counts. Coalescing every burst of input events down to one
+  // generate() call on the next tick (always reading the slider's
+  // *current* value when it fires, not a stale snapshot from whichever
+  // event triggered it) keeps the drag responsive at any cell count
+  // instead of falling behind. setTimeout(0) rather than
+  // requestAnimationFrame deliberately -- this only needs "run once after
+  // the current synchronous burst settles", not paint-cycle
+  // synchronization, and rAF can be throttled independently of whether the
+  // user is actively dragging.
+  let liveRegenPending = false;
+  function scheduleLiveRegen() {
+    if (liveRegenPending) return;
+    liveRegenPending = true;
+    setTimeout(() => {
+      liveRegenPending = false;
+      generate();
+    }, 0);
+  }
+
   generate();
   container.querySelector('#ow-regen').addEventListener('click', generate);
   container.querySelector('#ow-theme').addEventListener('change', generate);
+  container.querySelector('#ow-forest-bias').addEventListener('input', scheduleLiveRegen);
+  container.querySelector('#ow-rugged-bias').addEventListener('input', scheduleLiveRegen);
   wireMapExportSave(container, canvas, 'ow', (offCtx) => {
     const prevCtx = ctx;
     ctx = offCtx;
