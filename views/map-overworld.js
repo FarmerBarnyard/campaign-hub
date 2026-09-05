@@ -126,15 +126,19 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
 // distinct even though both now share one combined watercolor-wash base
 // tone (see paintWatercolorWash call sites below).
 function paintRosetteTexture(ctx, cx, cy, cw, ch, rng, ink, bold) {
-  const count = (bold ? 4 : 3) + Math.floor(rng() * 3);
+  const count = (bold ? 3 : 2) + Math.floor(rng() * 2);
   const sizeScale = bold ? 1.35 : 1;
   for (let i = 0; i < count; i++) {
-    const rx = cx + (rng() - 0.5) * cw * 0.7;
-    const ry = cy + (rng() - 0.5) * ch * 0.7;
-    const r = Math.min(cw, ch) * (0.06 + rng() * 0.05) * sizeScale;
+    const rx = cx + (rng() - 0.5) * cw * 0.6;
+    const ry = cy + (rng() - 0.5) * ch * 0.6;
+    // Radius as a larger fraction of the cell than the first tuning used --
+    // that version measured out to only ~3px per rosette at a typical
+    // 400-cell map, legible only when the render was artificially zoomed
+    // in for review, invisible at the map's actual on-screen size.
+    const r = Math.min(cw, ch) * (0.16 + rng() * 0.1) * sizeScale;
     ctx.strokeStyle = ink;
-    ctx.globalAlpha = 0.5;
-    ctx.lineWidth = Math.max(0.6, r * 0.18);
+    ctx.globalAlpha = 0.7;
+    ctx.lineWidth = Math.max(1, r * 0.2);
     ctx.beginPath();
     ctx.arc(rx, ry, r, 0, Math.PI * 2);
     ctx.stroke();
@@ -142,7 +146,7 @@ function paintRosetteTexture(ctx, cx, cy, cw, ch, rng, ink, bold) {
       const angle = (Math.PI / 4) * k;
       ctx.beginPath();
       ctx.moveTo(rx + Math.cos(angle) * r * 1.15, ry + Math.sin(angle) * r * 1.15);
-      ctx.lineTo(rx + Math.cos(angle) * r * 1.7, ry + Math.sin(angle) * r * 1.7);
+      ctx.lineTo(rx + Math.cos(angle) * r * 1.75, ry + Math.sin(angle) * r * 1.75);
       ctx.stroke();
     }
   }
@@ -618,11 +622,11 @@ function renderOverworldMap(container) {
         return b === 'hills' || b === 'mountains';
       });
       for (const chain of highlandChains) {
-        paintWatercolorWash(ctx, chaikinSmooth(chain, 2), washRng, palette.wash.hills, palette.ink, 28);
+        paintWatercolorWash(ctx, chaikinSmooth(chain, 3), washRng, palette.wash.hills, palette.ink, 28);
       }
       const forestChains = extractCoastlineChains(mesh.cells, (i) => cellData[i].biome === 'forest');
       for (const chain of forestChains) {
-        paintWatercolorWash(ctx, chaikinSmooth(chain, 2), washRng, palette.wash.forest, palette.ink, 28);
+        paintWatercolorWash(ctx, chaikinSmooth(chain, 3), washRng, palette.wash.forest, palette.ink, 28);
       }
 
       // Icon texture for hills/mountains/forest, drawn after the wash so it
@@ -638,17 +642,20 @@ function renderOverworldMap(container) {
       }
     }
 
-    // Coastline smoothing: interior biome-to-biome boundaries deliberately
-    // stay hard polygon edges (that's the visual language of this map, not
-    // a bug) -- only the land/water boundary gets the extra-ink Chaikin
-    // treatment, since that's the one edge worth reading as a coastline
-    // rather than a biome seam. Pure deterministic post-process over
-    // already-generated points, so it carries no rng/seed risk at all.
+    // Coastline smoothing, plus the extra-ink glow/stroke treatment below
+    // that's specific to the land/water boundary (a coastline reads as more
+    // significant than a biome-to-biome seam, so it gets its own emphasis).
+    // Plains/beach/snow/water biome-to-biome boundaries still meet at a
+    // hard polygon edge -- those biomes keep their original flat per-cell
+    // fill -- but hills/mountains/forest no longer do; their boundary is
+    // now the same smoothed chain the watercolor wash above was painted
+    // against. Pure deterministic post-process over already-generated
+    // points, so it carries no rng/seed risk at all.
     const isLand = (i) => heights[i] >= seaLevel;
     const coastChains = extractCoastlineChains(mesh.cells, isLand);
     ctx.lineJoin = 'round';
     for (const chain of coastChains) {
-      const smoothed = chaikinSmooth(chain, 2);
+      const smoothed = chaikinSmooth(chain, 3);
       ctx.beginPath();
       ctx.moveTo(smoothed[0].x, smoothed[0].y);
       for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
