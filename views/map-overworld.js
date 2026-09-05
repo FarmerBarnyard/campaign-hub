@@ -118,27 +118,29 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
 
 // Sunburst-rosette hill/mountain hatching (Silver Marches/Vaasa style, per
 // the map-generator plan's reference research) -- a small ring plus 8
-// short radiating strokes, tiled densely across a cell so an unbroken
-// stretch of hills/mountains reads as a continuous textured range rather
-// than a carpet of isolated icons. Replaces paintBiomeTexture's old
-// arc-bump ('hills') and jagged-peak ('mountains') cases; `bold` gives
-// mountains bigger, denser rosettes than hills so the two stay visually
-// distinct even though both now share one combined watercolor-wash base
-// tone (see paintWatercolorWash call sites below).
+// short radiating strokes, scattered a couple per cell as fine hatching on
+// top of the watercolor wash, not a solid fill. Replaces paintBiomeTexture's
+// old arc-bump ('hills') and jagged-peak ('mountains') cases; `bold` draws
+// one more rosette for mountains than hills, so the two stay distinguishable
+// even though both share one combined watercolor-wash base tone (see
+// paintWatercolorWash call sites below). Went through three tunings before
+// landing here, each only checked at an artificial zoom and missing how it
+// actually reads at a real map's cell density: too small/faint was
+// invisible; the fix for that then drew 2-5 large, opaque rosettes on every
+// matching cell, which at a dense hill/mountain mass compounds into a
+// solid, illegible scribble covering the whole region. This tuning keeps
+// each rosette small (so many overlapping ones still read as texture, not
+// blobs) at a modest, fixed per-cell count (so coverage is dense enough to
+// actually register without needing an artificial zoom, but never solid).
 function paintRosetteTexture(ctx, cx, cy, cw, ch, rng, ink, bold) {
-  const count = (bold ? 3 : 2) + Math.floor(rng() * 2);
-  const sizeScale = bold ? 1.35 : 1;
+  const count = bold ? 3 : 2;
   for (let i = 0; i < count; i++) {
-    const rx = cx + (rng() - 0.5) * cw * 0.6;
-    const ry = cy + (rng() - 0.5) * ch * 0.6;
-    // Radius as a larger fraction of the cell than the first tuning used --
-    // that version measured out to only ~3px per rosette at a typical
-    // 400-cell map, legible only when the render was artificially zoomed
-    // in for review, invisible at the map's actual on-screen size.
-    const r = Math.min(cw, ch) * (0.16 + rng() * 0.1) * sizeScale;
+    const rx = cx + (rng() - 0.5) * cw * 0.65;
+    const ry = cy + (rng() - 0.5) * ch * 0.65;
+    const r = Math.min(cw, ch) * (0.06 + rng() * 0.04);
     ctx.strokeStyle = ink;
-    ctx.globalAlpha = 0.7;
-    ctx.lineWidth = Math.max(1, r * 0.2);
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = Math.max(0.7, r * 0.18);
     ctx.beginPath();
     ctx.arc(rx, ry, r, 0, Math.PI * 2);
     ctx.stroke();
@@ -146,7 +148,7 @@ function paintRosetteTexture(ctx, cx, cy, cw, ch, rng, ink, bold) {
       const angle = (Math.PI / 4) * k;
       ctx.beginPath();
       ctx.moveTo(rx + Math.cos(angle) * r * 1.15, ry + Math.sin(angle) * r * 1.15);
-      ctx.lineTo(rx + Math.cos(angle) * r * 1.75, ry + Math.sin(angle) * r * 1.75);
+      ctx.lineTo(rx + Math.cos(angle) * r * 1.55, ry + Math.sin(angle) * r * 1.55);
       ctx.stroke();
     }
   }
