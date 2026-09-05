@@ -32,49 +32,86 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
   const r = rng();
   switch (biome) {
     case 'forest': {
-      if (r > 0.55) return;
-      const size = Math.min(cw, ch) * 0.32;
-      ctx.fillStyle = ink;
-      ctx.globalAlpha = 0.55;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy - size);
-      ctx.lineTo(cx - size * 0.7, cy + size * 0.5);
-      ctx.lineTo(cx + size * 0.7, cy + size * 0.5);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillRect(cx - size * 0.08, cy + size * 0.4, size * 0.16, size * 0.35);
+      // Dense enough to read as a forest carpet (WotC-style regional maps
+      // never show bare ground under a forest biome) -- up to two trees per
+      // cell, each a two-tier conifer silhouette rather than one flat
+      // triangle, so the texture itself carries more art-quality detail.
+      if (r > 0.85) return;
+      const treeCount = 1 + Math.floor(rng() * 2);
+      for (let t = 0; t < treeCount; t++) {
+        const tx = cx + (rng() - 0.5) * cw * 0.6;
+        const ty = cy + (rng() - 0.5) * ch * 0.4;
+        const size = Math.min(cw, ch) * (0.22 + rng() * 0.14);
+        ctx.fillStyle = ink;
+        ctx.globalAlpha = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(tx, ty - size);
+        ctx.lineTo(tx - size * 0.55, ty - size * 0.15);
+        ctx.lineTo(tx + size * 0.55, ty - size * 0.15);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(tx, ty - size * 0.5);
+        ctx.lineTo(tx - size * 0.7, ty + size * 0.45);
+        ctx.lineTo(tx + size * 0.7, ty + size * 0.45);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillRect(tx - size * 0.07, ty + size * 0.35, size * 0.14, size * 0.3);
+      }
       ctx.globalAlpha = 1;
       break;
     }
     case 'mountains': {
-      if (r > 0.75) return;
-      const w = cw * 0.85, h = ch * 0.7;
-      ctx.fillStyle = ink;
-      ctx.globalAlpha = 0.5;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy - h / 2);
-      ctx.lineTo(cx - w / 2, cy + h / 2);
-      ctx.lineTo(cx + w / 2, cy + h / 2);
-      ctx.closePath();
-      ctx.fill();
-      ctx.globalAlpha = 0.85;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy - h / 2);
-      ctx.lineTo(cx - w * 0.12, cy - h * 0.05);
-      ctx.lineTo(cx + w * 0.08, cy - h * 0.05);
-      ctx.closePath();
-      ctx.fill();
+      // A cluster of 2-3 overlapping jagged peaks with a light snow-cap
+      // highlight and a crisp outline -- the classic WotC mountain-range
+      // icon, rather than one flat isolated triangle. Near-total coverage
+      // (0.92) so mountain terrain reads as a continuous range.
+      if (r > 0.92) return;
+      const peakCount = 2 + Math.floor(rng() * 2);
+      for (let p = 0; p < peakCount; p++) {
+        const px = cx + (rng() - 0.5) * cw * 0.5;
+        const py = cy + (rng() - 0.5) * ch * 0.25;
+        const w = cw * 0.55 * (0.7 + rng() * 0.5);
+        const h = ch * 0.6 * (0.7 + rng() * 0.5);
+        ctx.fillStyle = ink;
+        ctx.globalAlpha = 0.55;
+        ctx.beginPath();
+        ctx.moveTo(px, py - h / 2);
+        ctx.lineTo(px - w / 2, py + h / 2);
+        ctx.lineTo(px + w / 2, py + h / 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.8;
+        ctx.lineWidth = 0.6;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+        ctx.moveTo(px, py - h / 2);
+        ctx.lineTo(px - w * 0.14, py - h * 0.08);
+        ctx.lineTo(px + w * 0.1, py - h * 0.08);
+        ctx.closePath();
+        ctx.fill();
+      }
       ctx.globalAlpha = 1;
       break;
     }
     case 'hills': {
-      if (r > 0.4) return;
-      ctx.strokeStyle = ink;
-      ctx.globalAlpha = 0.45;
-      ctx.lineWidth = Math.max(1, ch * 0.06);
-      ctx.beginPath();
-      ctx.arc(cx, cy + ch * 0.3, cw * 0.4, Math.PI, 0);
-      ctx.stroke();
+      // A small cluster of rounded mounds instead of one squiggle --
+      // reads as an icon rather than a single decorative line.
+      if (r > 0.65) return;
+      const bumps = 2 + Math.floor(rng() * 2);
+      for (let b = 0; b < bumps; b++) {
+        const bx = cx + (rng() - 0.5) * cw * 0.5;
+        const bw = cw * (0.28 + rng() * 0.15);
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.5;
+        ctx.lineWidth = Math.max(1, ch * 0.05);
+        ctx.beginPath();
+        ctx.arc(bx, cy + ch * 0.25, bw, Math.PI, 0);
+        ctx.stroke();
+      }
       ctx.globalAlpha = 1;
       break;
     }
@@ -173,15 +210,18 @@ function computeRoadPath(cells, biomeOf, nearRiverFlag, startIdx, endIdx) {
   return path;
 }
 
-const OW_TIER_RADIUS = { village: 3.5, town: 5.5, city: 8 };
-const OW_TIER_FONT = { village: '10px sans-serif', town: 'bold 11px sans-serif', city: 'bold 13px sans-serif' };
+const OW_TIER_RADIUS = { village: 4.5, town: 6, city: 9 };
+const OW_SERIF = 'Georgia, "Palatino Linotype", "Book Antiqua", serif';
+const OW_TIER_FONT = {
+  village: `10px ${OW_SERIF}`,
+  town: `bold 11px ${OW_SERIF}`,
+  city: `bold 14px ${OW_SERIF}`,
+};
 
-// Settlement iconography: a distinct glyph per tier instead of one filled
-// circle at three sizes, so tier reads at a glance even without comparing
-// marker sizes against each other. village keeps the plain dot (the
-// smallest/most numerous tier reads fine as a simple point); town becomes a
-// diamond; city becomes a five-pointed star, echoing the classic map-symbol
-// convention for a capital.
+// Settlement iconography: a pictorial glyph per tier rather than an
+// abstract shape, echoing published-map settlement symbols -- village is a
+// small hut, town a single tower, city a three-towered castle -- so tier
+// reads at a glance from the icon's silhouette itself, not just its size.
 // On-canvas legend: drawn onto the canvas itself (not just the page around
 // it) so it travels with an exported/saved PNG, which is the actual
 // deliverable pasted into notes -- a page-only legend wouldn't. Always the
@@ -220,7 +260,7 @@ function drawMapLegend(ctx, canvas, palette) {
   ctx.lineWidth = 1;
   ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
 
-  ctx.font = '10px sans-serif';
+  ctx.font = `10px ${OW_SERIF}`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
 
@@ -247,28 +287,113 @@ function drawMapLegend(ctx, canvas, palette) {
   ctx.restore();
 }
 
-function drawSettlementIcon(ctx, tier, cx, cy, r) {
-  if (tier === 'town') {
+// A soft radial vignette plus an ornate double-line border with corner
+// flourishes -- drawn last, over everything else, so it reads as the map's
+// frame rather than something terrain/roads/settlements could cover.
+// Reuses palette.coastline (already the map's boldest ink accent) rather
+// than adding a new theme key.
+function drawMapVignetteAndBorder(ctx, canvas, ink) {
+  const w = canvas.width, h = canvas.height;
+  const grad = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.32, w / 2, h / 2, Math.max(w, h) * 0.72);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.22)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.save();
+  ctx.strokeStyle = ink;
+  const inset = 5;
+  ctx.globalAlpha = 0.85;
+  ctx.lineWidth = 4;
+  ctx.strokeRect(inset, inset, w - inset * 2, h - inset * 2);
+  ctx.lineWidth = 1.2;
+  ctx.strokeRect(inset + 7, inset + 7, w - (inset + 7) * 2, h - (inset + 7) * 2);
+
+  const cs = 18;
+  ctx.lineWidth = 2;
+  for (const [x, y, dx, dy] of [[inset, inset, 1, 1], [w - inset, inset, -1, 1], [inset, h - inset, 1, -1], [w - inset, h - inset, -1, -1]]) {
     ctx.beginPath();
-    ctx.moveTo(cx, cy - r);
-    ctx.lineTo(cx + r, cy);
-    ctx.lineTo(cx, cy + r);
-    ctx.lineTo(cx - r, cy);
+    ctx.moveTo(x, y + dy * cs);
+    ctx.lineTo(x, y);
+    ctx.lineTo(x + dx * cs, y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// A classic four-point compass rose with emphasized north, drawn in a
+// corner clear of the legend/settlement-action panels.
+function drawCompassRose(ctx, cx, cy, r, ink) {
+  ctx.save();
+  ctx.fillStyle = ink;
+  ctx.strokeStyle = ink;
+  ctx.globalAlpha = 0.85;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.stroke();
+  for (let i = 0; i < 4; i++) {
+    const angle = (Math.PI / 2) * i - Math.PI / 2;
+    const len = i === 0 ? r * 1.05 : r * 0.95;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(angle - 0.13) * len * 0.35, cy + Math.sin(angle - 0.13) * len * 0.35);
+    ctx.lineTo(cx + Math.cos(angle) * len, cy + Math.sin(angle) * len);
+    ctx.lineTo(cx + Math.cos(angle + 0.13) * len * 0.35, cy + Math.sin(angle + 0.13) * len * 0.35);
     ctx.closePath();
     ctx.fill();
+  }
+  for (let i = 0; i < 4; i++) {
+    const angle = (Math.PI / 2) * i - Math.PI / 2 + Math.PI / 4;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(angle) * r * 0.55, cy + Math.sin(angle) * r * 0.55);
+    ctx.stroke();
+  }
+  ctx.font = `bold 11px ${OW_SERIF}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('N', cx, cy - r - 11);
+  ctx.restore();
+}
+
+function drawSettlementIcon(ctx, tier, cx, cy, r) {
+  if (tier === 'village') {
+    // A small hut: triangular roof over a low base.
+    const w = r * 1.5, roofH = r * 1.15, baseH = r * 0.7;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - roofH);
+    ctx.lineTo(cx - w / 2, cy);
+    ctx.lineTo(cx + w / 2, cy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillRect(cx - w * 0.3, cy, w * 0.6, baseH);
+    return;
+  }
+  if (tier === 'town') {
+    // A single tower: rectangular body under a pointed roof.
+    const w = r * 1.15, bodyH = r * 1.7, roofH = r;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - bodyH / 2 - roofH);
+    ctx.lineTo(cx - w / 2, cy - bodyH / 2);
+    ctx.lineTo(cx + w / 2, cy - bodyH / 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillRect(cx - w / 2, cy - bodyH / 2, w, bodyH);
     return;
   }
   if (tier === 'city') {
-    const points = 5, innerR = r * 0.45;
-    ctx.beginPath();
-    for (let i = 0; i < points * 2; i++) {
-      const rad = i % 2 === 0 ? r : innerR;
-      const angle = (Math.PI / points) * i - Math.PI / 2;
-      const x = cx + Math.cos(angle) * rad, y = cy + Math.sin(angle) * rad;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    // A three-towered castle -- a taller keep flanked by two shorter
+    // towers, each with a crenellated top, echoing a capital-city symbol.
+    const towerW = r * 0.55, gap = r * 0.18, bodyH = r * 1.5;
+    const merlonW = towerW / 3;
+    for (const dx of [-(towerW + gap), 0, towerW + gap]) {
+      const h = dx === 0 ? bodyH * 1.2 : bodyH;
+      const top = cy - h / 2;
+      ctx.fillRect(cx + dx - towerW / 2, top, towerW, h);
+      ctx.fillRect(cx + dx - towerW / 2, top - merlonW * 0.6, merlonW, merlonW * 0.6);
+      ctx.fillRect(cx + dx + towerW / 2 - merlonW, top - merlonW * 0.6, merlonW, merlonW * 0.6);
     }
-    ctx.closePath();
-    ctx.fill();
     return;
   }
   ctx.beginPath();
@@ -477,14 +602,21 @@ function renderOverworldMap(container) {
     // already-generated points, so it carries no rng/seed risk at all.
     const isLand = (i) => heights[i] >= seaLevel;
     const coastChains = extractCoastlineChains(mesh.cells, isLand);
-    ctx.strokeStyle = palette.coastline;
-    ctx.lineWidth = 1.5;
     ctx.lineJoin = 'round';
     for (const chain of coastChains) {
       const smoothed = chaikinSmooth(chain, 2);
       ctx.beginPath();
       ctx.moveTo(smoothed[0].x, smoothed[0].y);
       for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
+      // A soft glow band under the crisp ink line -- the same path stroked
+      // twice, wide/faint then thin/solid -- echoes the halo published maps
+      // often put around a coastline instead of a single flat rule.
+      ctx.strokeStyle = palette.coastline;
+      ctx.globalAlpha = 0.18;
+      ctx.lineWidth = 7;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1.5;
       ctx.stroke();
     }
 
@@ -615,6 +747,9 @@ function renderOverworldMap(container) {
     }
 
     if (legendOn) drawMapLegend(ctx, canvas, palette);
+
+    drawCompassRose(ctx, canvas.width - 50, 50, 28, palette.coastline);
+    drawMapVignetteAndBorder(ctx, canvas, palette.coastline);
 
     // Suggested campaign theme: a heuristic read of this specific map's own
     // statistics (biome mix, settlement tiers, river count, island-ness),
