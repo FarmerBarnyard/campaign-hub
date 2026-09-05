@@ -61,60 +61,9 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
       ctx.globalAlpha = 1;
       break;
     }
-    case 'mountains': {
-      // A cluster of 2-3 overlapping jagged peaks with a light snow-cap
-      // highlight and a crisp outline -- the classic WotC mountain-range
-      // icon, rather than one flat isolated triangle. Near-total coverage
-      // (0.92) so mountain terrain reads as a continuous range.
-      if (r > 0.92) return;
-      const peakCount = 2 + Math.floor(rng() * 2);
-      for (let p = 0; p < peakCount; p++) {
-        const px = cx + (rng() - 0.5) * cw * 0.5;
-        const py = cy + (rng() - 0.5) * ch * 0.25;
-        const w = cw * 0.55 * (0.7 + rng() * 0.5);
-        const h = ch * 0.6 * (0.7 + rng() * 0.5);
-        ctx.fillStyle = ink;
-        ctx.globalAlpha = 0.55;
-        ctx.beginPath();
-        ctx.moveTo(px, py - h / 2);
-        ctx.lineTo(px - w / 2, py + h / 2);
-        ctx.lineTo(px + w / 2, py + h / 2);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = ink;
-        ctx.globalAlpha = 0.8;
-        ctx.lineWidth = 0.6;
-        ctx.stroke();
-        ctx.fillStyle = 'rgba(255,255,255,0.55)';
-        ctx.globalAlpha = 1;
-        ctx.beginPath();
-        ctx.moveTo(px, py - h / 2);
-        ctx.lineTo(px - w * 0.14, py - h * 0.08);
-        ctx.lineTo(px + w * 0.1, py - h * 0.08);
-        ctx.closePath();
-        ctx.fill();
-      }
-      ctx.globalAlpha = 1;
-      break;
-    }
-    case 'hills': {
-      // A small cluster of rounded mounds instead of one squiggle --
-      // reads as an icon rather than a single decorative line.
-      if (r > 0.65) return;
-      const bumps = 2 + Math.floor(rng() * 2);
-      for (let b = 0; b < bumps; b++) {
-        const bx = cx + (rng() - 0.5) * cw * 0.5;
-        const bw = cw * (0.28 + rng() * 0.15);
-        ctx.strokeStyle = ink;
-        ctx.globalAlpha = 0.5;
-        ctx.lineWidth = Math.max(1, ch * 0.05);
-        ctx.beginPath();
-        ctx.arc(bx, cy + ch * 0.25, bw, Math.PI, 0);
-        ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
-      break;
-    }
+    // 'mountains' and 'hills' texture is now paintRosetteTexture(), called
+    // separately after the watercolor-wash pass so it sits on top of the
+    // painted region rather than the old flat per-cell fill.
     case 'plains': {
       if (r > 0.3) return;
       ctx.strokeStyle = ink;
@@ -165,6 +114,39 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
       break;
     }
   }
+}
+
+// Sunburst-rosette hill/mountain hatching (Silver Marches/Vaasa style, per
+// the map-generator plan's reference research) -- a small ring plus 8
+// short radiating strokes, tiled densely across a cell so an unbroken
+// stretch of hills/mountains reads as a continuous textured range rather
+// than a carpet of isolated icons. Replaces paintBiomeTexture's old
+// arc-bump ('hills') and jagged-peak ('mountains') cases; `bold` gives
+// mountains bigger, denser rosettes than hills so the two stay visually
+// distinct even though both now share one combined watercolor-wash base
+// tone (see paintWatercolorWash call sites below).
+function paintRosetteTexture(ctx, cx, cy, cw, ch, rng, ink, bold) {
+  const count = (bold ? 4 : 3) + Math.floor(rng() * 3);
+  const sizeScale = bold ? 1.35 : 1;
+  for (let i = 0; i < count; i++) {
+    const rx = cx + (rng() - 0.5) * cw * 0.7;
+    const ry = cy + (rng() - 0.5) * ch * 0.7;
+    const r = Math.min(cw, ch) * (0.06 + rng() * 0.05) * sizeScale;
+    ctx.strokeStyle = ink;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = Math.max(0.6, r * 0.18);
+    ctx.beginPath();
+    ctx.arc(rx, ry, r, 0, Math.PI * 2);
+    ctx.stroke();
+    for (let k = 0; k < 8; k++) {
+      const angle = (Math.PI / 4) * k;
+      ctx.beginPath();
+      ctx.moveTo(rx + Math.cos(angle) * r * 1.15, ry + Math.sin(angle) * r * 1.15);
+      ctx.lineTo(rx + Math.cos(angle) * r * 1.7, ry + Math.sin(angle) * r * 1.7);
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
 }
 
 // Relative cost of routing a road through each biome -- plains/beach are
@@ -458,7 +440,16 @@ function renderOverworldMap(container) {
   let currentSeed = 0;
   let currentSettlements = [];
 
-  function generate() {
+  // `fast` skips the multi-layer watercolor wash and rosette/tree icon
+  // passes -- the two most expensive additions in this rendering pass --
+  // for the live-dragging Vegetation/Ruggedness feedback loop, which needs
+  // to redraw on every slider tick. The per-cell fill (already using the
+  // muted wash tone, not the old saturated flat color) still applies in
+  // fast mode, so a drag-in-progress still looks reasonably close to the
+  // final result, just without the mottled texture until the drag settles
+  // (scheduleLiveRegen's trailing full-quality redraw, wired below) or the
+  // user hits Regenerate/changes the theme.
+  function generate(fast) {
     const seed = parseInt(container.querySelector('#ow-seed').value, 10) || 1;
     const cellCount = parseInt(container.querySelector('#ow-cells').value, 10) || 400;
     const octaves = parseInt(container.querySelector('#ow-oct').value, 10) || 4;
@@ -488,6 +479,8 @@ function renderOverworldMap(container) {
     const riverCurveRng = mulberry32(seed + 11111);
     const regionRng = mulberry32(seed + 22222);
     const themeSuggestRng = mulberry32(seed + 67890);
+    const washRng = mulberry32(seed + 44444);
+    const rosetteRng = mulberry32(seed + 88888);
 
     const mesh = buildVoronoiMesh(meshRng, canvas.width, canvas.height, cellCount);
 
@@ -576,6 +569,13 @@ function renderOverworldMap(container) {
       return best;
     });
 
+    // hills/mountains/forest are a continuous painted wash (see
+    // paintWatercolorWash below) rather than a flat per-cell color -- every
+    // WotC reference reviewed for this generator renders those terrain
+    // classes as a soft, mottled wash, never a hard-edged flat fill.
+    // Plains/beach/water/snow keep the original flat fill, matching those
+    // same references (which render those classes plainly too).
+    const OW_WASH_BIOMES = { hills: true, mountains: true, forest: true };
     for (const { cell, biome } of cellData) {
       const poly = cell.polygon;
       if (poly.length < 3) continue;
@@ -583,15 +583,59 @@ function renderOverworldMap(container) {
       ctx.moveTo(poly[0].x, poly[0].y);
       for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
       ctx.closePath();
-      ctx.fillStyle = palette.biomes[biome];
+      let fillColor;
+      if (OW_WASH_BIOMES[biome]) {
+        const tone = biome === 'forest' ? palette.wash.forest : palette.wash.hills;
+        fillColor = `hsl(${tone.h}, ${tone.s}%, ${tone.l}%)`;
+      } else {
+        fillColor = palette.biomes[biome];
+      }
+      ctx.fillStyle = fillColor;
       ctx.fill();
       // Stroking in the fill's own color papers over hairline seams
       // between adjacent polygons that floating-point clipping can leave.
-      ctx.strokeStyle = palette.biomes[biome];
+      ctx.strokeStyle = fillColor;
       ctx.lineWidth = 1;
       ctx.stroke();
-      const r = Math.sqrt(polygonArea(poly) / Math.PI);
-      paintBiomeTexture(ctx, biome, cell.x, cell.y, r * 2, r * 2, textureRng, palette.ink);
+      if (!OW_WASH_BIOMES[biome]) {
+        const r = Math.sqrt(polygonArea(poly) / Math.PI);
+        paintBiomeTexture(ctx, biome, cell.x, cell.y, r * 2, r * 2, textureRng, palette.ink);
+      }
+    }
+
+    // One paintWatercolorWash() call per contiguous cluster of matching
+    // cells (not per cell) -- extractCoastlineChains is fully generic (a
+    // plain (cellIndex) => boolean predicate, no land/water-specific logic
+    // inside it), so passing a biome-class predicate here extracts one
+    // boundary chain per contiguous hill/mountain or forest mass with no
+    // changes needed to the function itself. Hills and mountains share one
+    // combined wash pass/tone (real reference maps show a single continuous
+    // highland wash, not two abutting flat colors); they stay visually
+    // distinct via the rosette icon pass below instead.
+    if (!fast) {
+      const highlandChains = extractCoastlineChains(mesh.cells, (i) => {
+        const b = cellData[i].biome;
+        return b === 'hills' || b === 'mountains';
+      });
+      for (const chain of highlandChains) {
+        paintWatercolorWash(ctx, chaikinSmooth(chain, 2), washRng, palette.wash.hills, palette.ink, 28);
+      }
+      const forestChains = extractCoastlineChains(mesh.cells, (i) => cellData[i].biome === 'forest');
+      for (const chain of forestChains) {
+        paintWatercolorWash(ctx, chaikinSmooth(chain, 2), washRng, palette.wash.forest, palette.ink, 28);
+      }
+
+      // Icon texture for hills/mountains/forest, drawn after the wash so it
+      // sits crisply on top of the painted texture rather than underneath it.
+      for (const { cell, biome } of cellData) {
+        if (cell.polygon.length < 3) continue;
+        const r = Math.sqrt(polygonArea(cell.polygon) / Math.PI);
+        if (biome === 'hills' || biome === 'mountains') {
+          paintRosetteTexture(ctx, cell.x, cell.y, r * 2, r * 2, rosetteRng, palette.ink, biome === 'mountains');
+        } else if (biome === 'forest') {
+          paintBiomeTexture(ctx, biome, cell.x, cell.y, r * 2, r * 2, textureRng, palette.ink);
+        }
+      }
     }
 
     // Coastline smoothing: interior biome-to-biome boundaries deliberately
@@ -833,12 +877,18 @@ function renderOverworldMap(container) {
   // tick -- instant feedback is the actual point of a "sculpt this
   // terrain" control, and it's safe to do live because biomeAt() is a
   // cheap reclassification of already-computed height/moisture, not a
-  // re-roll of the mesh/heightmap/settlements. But a full generate() still
-  // costs ~50ms at the default 400 cells and ~300ms at the 1000-cell
-  // ceiling (measured) -- a slider can fire input events faster than that,
-  // so naive per-event redraw would queue up a growing backlog at high
-  // cell counts. Coalescing every burst of input events down to one
-  // generate() call on the next tick (always reading the slider's
+  // re-roll of the mesh/heightmap/settlements. A full generate() (measured,
+  // watercolor-wash work included) costs roughly 150ms at the default 400
+  // cells and 600-750ms at the 1000-cell ceiling -- the latter is too slow
+  // for a fluid drag regardless of the wash (the wash itself only accounts
+  // for ~100-150ms of that; the rest is pre-existing mesh/settlement/road
+  // cost at that cell count, unrelated to this pass). `generate(true)`
+  // (fast mode) skips the wash and rosette/tree icon passes for in-drag
+  // ticks; the 'change' listeners below run one full-quality redraw once
+  // the slider is released. A slider can also fire input events faster
+  // than even the fast path redraws, so naive per-event redraw would queue
+  // up a growing backlog. Coalescing every burst of input events down to
+  // one generate() call on the next tick (always reading the slider's
   // *current* value when it fires, not a stale snapshot from whichever
   // event triggered it) keeps the drag responsive at any cell count
   // instead of falling behind. setTimeout(0) rather than
@@ -846,25 +896,41 @@ function renderOverworldMap(container) {
   // the current synchronous burst settles", not paint-cycle
   // synchronization, and rAF can be throttled independently of whether the
   // user is actively dragging.
-  let liveRegenPending = false;
+  let liveRegenTimeoutId = null;
   function scheduleLiveRegen() {
-    if (liveRegenPending) return;
-    liveRegenPending = true;
-    setTimeout(() => {
-      liveRegenPending = false;
-      generate();
+    if (liveRegenTimeoutId !== null) return;
+    liveRegenTimeoutId = setTimeout(() => {
+      liveRegenTimeoutId = null;
+      generate(true);
     }, 0);
   }
+  // 'change' fires once when the slider is released (unlike 'input', which
+  // fires continuously while dragging), synchronously right after the
+  // final 'input' event -- used to run one full-quality redraw (wash +
+  // rosette/tree icons) once dragging settles. Must cancel any timeout
+  // still pending from that final 'input' tick first: setTimeout(0)
+  // callbacks run after the current synchronous handler (this one)
+  // finishes, so an uncancelled fast-mode redraw would fire right after
+  // this full-quality one and silently revert the map back to fast mode.
+  function finishLiveRegen() {
+    if (liveRegenTimeoutId !== null) {
+      clearTimeout(liveRegenTimeoutId);
+      liveRegenTimeoutId = null;
+    }
+    generate(false);
+  }
 
-  generate();
-  container.querySelector('#ow-regen').addEventListener('click', generate);
-  container.querySelector('#ow-theme').addEventListener('change', generate);
+  generate(false);
+  container.querySelector('#ow-regen').addEventListener('click', () => generate(false));
+  container.querySelector('#ow-theme').addEventListener('change', () => generate(false));
   container.querySelector('#ow-forest-bias').addEventListener('input', scheduleLiveRegen);
+  container.querySelector('#ow-forest-bias').addEventListener('change', finishLiveRegen);
   container.querySelector('#ow-rugged-bias').addEventListener('input', scheduleLiveRegen);
+  container.querySelector('#ow-rugged-bias').addEventListener('change', finishLiveRegen);
   wireMapExportSave(container, canvas, 'ow', (offCtx) => {
     const prevCtx = ctx;
     ctx = offCtx;
-    generate();
+    generate(false);
     ctx = prevCtx;
   });
 }
