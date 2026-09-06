@@ -161,24 +161,62 @@ function paintRosetteTexture(ctx, cx, cy, cw, ch, rng, ink, bold) {
 // routable graph entirely (roads in this world don't cross open water).
 const OW_TERRAIN_ROAD_COST = { beach: 1.2, plains: 1, forest: 1.3, hills: 2, mountains: 4, snow: 2.5 };
 
+// Binary min-heap keyed by `.dist`, used only by computeRoadPath below.
+function MinHeap() { this.a = []; }
+MinHeap.prototype.push = function (item) {
+  const a = this.a;
+  a.push(item);
+  let i = a.length - 1;
+  while (i > 0) {
+    const parent = (i - 1) >> 1;
+    if (a[parent].dist <= a[i].dist) break;
+    const tmp = a[parent]; a[parent] = a[i]; a[i] = tmp;
+    i = parent;
+  }
+};
+MinHeap.prototype.pop = function () {
+  const a = this.a;
+  const top = a[0];
+  const last = a.pop();
+  if (a.length > 0) {
+    a[0] = last;
+    let i = 0;
+    for (;;) {
+      const l = i * 2 + 1, r = i * 2 + 2;
+      let smallest = i;
+      if (l < a.length && a[l].dist < a[smallest].dist) smallest = l;
+      if (r < a.length && a[r].dist < a[smallest].dist) smallest = r;
+      if (smallest === i) break;
+      const tmp = a[smallest]; a[smallest] = a[i]; a[i] = tmp;
+      i = smallest;
+    }
+  }
+  return top;
+};
+
 // Dijkstra shortest path over the mesh's cell-adjacency graph, weighted by
 // terrain -- replaces a straight jittered curve between two settlements
 // with a route that actually prefers plains over mountains, and costs
-// extra (not prohibitive) to ford a river without a bridge. A simple
-// linear-scan extract-min rather than a binary heap: the mesh is small
-// enough (at most ~1000 cells) and this only runs once per road, not
-// per frame, so the simpler implementation isn't worth the complexity.
+// extra (not prohibitive) to ford a river without a bridge. Binary-heap
+// extract-min, not the old linear scan: that version was explicitly
+// justified by "mesh is small enough (~1000 cells)", an assumption the grid
+// mesh breaks by well over an order of magnitude (tens of thousands of
+// cells) -- O(n^2) there would be well over a billion comparisons per road.
+// This is O((E+V) log V), same shortest-path result, just reachable in
+// bounded time at the new scale.
 function computeRoadPath(cells, biomeOf, nearRiverFlag, startIdx, endIdx) {
   const n = cells.length;
   const dist = new Float64Array(n).fill(Infinity);
   const prev = new Int32Array(n).fill(-1);
   const visited = new Uint8Array(n);
   dist[startIdx] = 0;
-  for (let iter = 0; iter < n; iter++) {
-    let u = -1, best = Infinity;
-    for (let i = 0; i < n; i++) { if (!visited[i] && dist[i] < best) { best = dist[i]; u = i; } }
-    if (u === -1 || u === endIdx) break;
+  const heap = new MinHeap();
+  heap.push({ idx: startIdx, dist: 0 });
+  while (heap.a.length > 0) {
+    const { idx: u, dist: ud } = heap.pop();
+    if (visited[u] || ud > dist[u]) continue; // stale heap entry
     visited[u] = 1;
+    if (u === endIdx) break;
     for (const v of cells[u].neighbors) {
       if (visited[v]) continue;
       const biome = biomeOf[v];
@@ -187,7 +225,7 @@ function computeRoadPath(cells, biomeOf, nearRiverFlag, startIdx, endIdx) {
       const terrainCost = OW_TERRAIN_ROAD_COST[biome] || 1;
       const riverPenalty = nearRiverFlag[v] > 0 ? 1.5 : 1;
       const alt = dist[u] + d * terrainCost * riverPenalty;
-      if (alt < dist[v]) { dist[v] = alt; prev[v] = u; }
+      if (alt < dist[v]) { dist[v] = alt; prev[v] = u; heap.push({ idx: v, dist: alt }); }
     }
   }
   if (dist[endIdx] === Infinity) return null;
@@ -505,16 +543,18 @@ function drawSettlementIcon(ctx, tier, cx, cy, r) {
   ctx.fill();
 }
 
-// Overworld/region map: a hand-rolled Voronoi mesh (lib/voronoi-mesh.js)
-// gives irregular polygon cells instead of a uniform grid; height/moisture
-// are sampled continuously (lib/noise.js's makeFbmSampler) at each cell's
-// site rather than baked into a raster. Biome classification, settlement
-// placement (scoring + min-distance filter), and roads (nearest-neighbor
-// MST) work exactly as before, just against polygon-cell data instead of
-// grid-index data. Settlement tiers and biome texture are purely cosmetic
-// passes over that same data -- neither perturbs the underlying generation,
-// so a given seed still reproduces the same land shape/settlement positions
-// across themes and re-generates.
+// Overworld/region map: a regular grid + hydraulic-erosion heightmap
+// (lib/terrain-grid.js), replacing the earlier Voronoi-mesh terrain --
+// Voronoi cell *boundaries* read as artificial/cellular regardless of how
+// much smoothing sat on top of them, since every coastline and biome edge
+// was ultimately a straight polygon seam. A grid cell exposes the same
+// `{x, y, index, neighbors}` shape a Voronoi cell did, so hydrology, naming
+// regions, settlement scoring, and road MST all carry over unchanged;
+// rendering shifts from per-cell polygon fill to per-band marching-squares
+// contour fill (see the ordered fill pass in generate() below), since grid
+// cells have no polygon of their own. lib/voronoi-mesh.js's actual
+// Delaunay/Voronoi code is untouched -- views/map-settlement.js still uses
+// it for an unrelated generator.
 function renderOverworldMap(container) {
   container.innerHTML = `
     <h2>Overworld map generator</h2>
@@ -522,7 +562,7 @@ function renderOverworldMap(container) {
       <div class="map-controls">
         <label>Seed <input id="ow-seed" type="number" value="${Math.floor(Math.random() * 1e6)}"></label>
         <label>Theme <select id="ow-theme"></select></label>
-        <label>Cells <input id="ow-cells" type="number" value="400" min="50" max="1000"></label>
+        <label>Cells <input id="ow-cells" type="number" value="40000" min="10000" max="70000" step="5000"></label>
         <label>Octaves <input id="ow-oct" type="number" value="4" min="1" max="6"></label>
         <label>Sea level <input id="ow-sea" type="range" min="0" max="100" value="42"></label>
         <label>Vegetation <input id="ow-forest-bias" type="range" min="-40" max="40" value="0"></label>
@@ -562,70 +602,35 @@ function renderOverworldMap(container) {
   let currentSeed = 0;
   let currentSettlements = [];
 
-  // `fast` skips the multi-layer watercolor wash and rosette/tree icon
-  // passes -- the two most expensive additions in this rendering pass --
-  // for the live-dragging Vegetation/Ruggedness feedback loop, which needs
-  // to redraw on every slider tick. The per-cell fill (already using the
-  // muted wash tone, not the old saturated flat color) still applies in
-  // fast mode, so a drag-in-progress still looks reasonably close to the
-  // final result, just without the mottled texture until the drag settles
-  // (scheduleLiveRegen's trailing full-quality redraw, wired below) or the
-  // user hits Regenerate/changes the theme.
-  function generate(fast) {
-    const seed = parseInt(container.querySelector('#ow-seed').value, 10) || 1;
-    const cellCount = parseInt(container.querySelector('#ow-cells').value, 10) || 400;
-    const octaves = parseInt(container.querySelector('#ow-oct').value, 10) || 4;
-    const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
-    const forestBias = parseInt(container.querySelector('#ow-forest-bias').value, 10) / 100;
-    const ruggedBias = parseInt(container.querySelector('#ow-rugged-bias').value, 10) / 100;
-    const island = container.querySelector('#ow-island').checked;
-    const riversOn = container.querySelector('#ow-rivers').checked;
-    const legendOn = container.querySelector('#ow-legend').checked;
-    const settleCount = parseInt(container.querySelector('#ow-settle').value, 10) || 0;
-    const theme = MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
-    const palette = theme.overworld;
+  // Hydraulic erosion is a one-time cost (~0.3-0.9s at this grid's
+  // resolution, measured in the Step 0 prototype) that must never re-run on
+  // a live Vegetation/Ruggedness slider tick. Those sliders only reclassify
+  // the already-computed height/moisture field (biomeAt's forestBias/
+  // ruggedBias) -- and per convention #3, settlement placement, naming, and
+  // road routing all key off the *unbiased* refBiome and must stay fixed
+  // under the sliders too. That means everything below except the final
+  // LIVE `biome` field and all rendering is a pure function of
+  // {seed, cellCount, octaves, island, seaLevel, riversOn, settleCount} --
+  // none of which a live-drag tick ever changes -- so it all belongs in one
+  // cache, not just the height field. Missing this the first time through
+  // this rewrite left road routing's own (now-correct, but still real)
+  // Dijkstra cost running on every slider tick, which alone made fast-mode
+  // ticks take as long as a full regenerate -- caught by actually timing a
+  // live-drag tick against this real render, not assumed fast because the
+  // algorithmic complexity fix was in place.
+  let worldCache = null;
+  function buildWorld(seed, cellCount, octaves, island, seaLevel, riversOn, settleCount) {
+    const key = [seed, cellCount, octaves, island, seaLevel, riversOn, settleCount].join('|');
+    if (worldCache && worldCache.key === key) return worldCache;
 
-    const rng = mulberry32(seed);
-    const heightSample = makeFbmSampler(rng, octaves);
-    const moistureSample = makeFbmSampler(mulberry32(seed + 99991), Math.max(1, octaves - 1));
-    // Dedicated rngs for every generative concern that must never perturb
-    // another -- mesh geometry, biome texture, settlement names, river-curve
-    // jitter -- kept separate from `rng` above (terrain) so switching
-    // themes, toggling rivers, or regenerating never perturbs a different
-    // pass's output. River *routing* itself needs no rng (it's a
-    // deterministic function of the height field); only the cosmetic curve
-    // wobble does, matching the dungeon wobble / road-curve precedent.
     const meshRng = mulberry32(seed + 77777);
-    const textureRng = mulberry32(seed + 55555);
-    const nameRng = mulberry32(seed + 33333);
-    const riverCurveRng = mulberry32(seed + 11111);
-    const regionRng = mulberry32(seed + 22222);
-    const themeSuggestRng = mulberry32(seed + 67890);
-    const washRng = mulberry32(seed + 44444);
-    const rosetteRng = mulberry32(seed + 88888);
-    const grainRng = mulberry32(seed + 13579);
-    const borderRng = mulberry32(seed + 24680);
+    const mesh = buildTerrainGrid(meshRng, canvas.width, canvas.height, cellCount);
+    const { cols, rows, cellW, cellH } = mesh;
 
-    const mesh = buildVoronoiMesh(meshRng, canvas.width, canvas.height, cellCount);
-
-    // Naming regions: a handful of flood-filled zones over the same
-    // adjacency graph, each biased toward one phoneme "flavor" once its
-    // dominant biome is known below. Built now (region membership only
-    // needs the adjacency graph, not biome/height data) but not resolved to
-    // an actual phoneme category per region until the biome tally after
-    // cellData exists.
-    const regionCount = Math.max(2, Math.min(8, Math.round(cellCount / 60)));
-    const regionOf = assignNamingRegions(mesh.cells, regionCount, regionRng);
-
-    const cx = canvas.width / 2, cy = canvas.height / 2;
-    const maxD = Math.hypot(cx, cy);
-
-    // Pipeline order: heights -> flow/rivers -> moisture adjustment ->
-    // biome classification -> settlements. Heights come first because flow
-    // routing needs the full height field; biome classification comes last
-    // (of these four) because river/lake presence bumps moisture, which
-    // must land before biomeAt() runs, not after.
+    const heightRng = mulberry32(seed);
+    const heightSample = makeFbmSampler(heightRng, octaves);
     const heights = new Float64Array(mesh.cells.length);
+    const cx = canvas.width / 2, cy = canvas.height / 2, maxD = Math.hypot(cx, cy);
     mesh.cells.forEach((cell, i) => {
       let h = heightSample(cell.x / canvas.width, cell.y / canvas.height);
       if (island) {
@@ -635,11 +640,34 @@ function renderOverworldMap(container) {
       heights[i] = h;
     });
 
+    // Erosion pipeline (lib/terrain-grid.js), matching the Step 0 prototype
+    // exactly: pit-fill before erosion so hydrology below doesn't inherit
+    // the raw noise field's own tiny pits, hydraulic + thermal erosion for
+    // the actual organic shaping, then a second pit-fill pass since erosion
+    // itself introduces new small single-cell pits.
+    const erosionRng = mulberry32(seed + 50505);
+    fillPits(heights, cols, rows, seaLevel);
+    applyHydraulicErosion(heights, cols, rows, erosionRng, {});
+    applyThermalErosion(heights, cols, rows, 3, 0.025, 0.5);
+    fillPits(heights, cols, rows, seaLevel);
+
+    let highestIdx = 0;
+    for (let i = 1; i < heights.length; i++) if (heights[i] > heights[highestIdx]) highestIdx = i;
+    const highestPoint = { x: mesh.cells[highestIdx].x, y: mesh.cells[highestIdx].y };
+
+    // Naming regions: generic adjacency BFS, independent of biome/height
+    // beyond the adjacency graph itself.
+    const regionRng = mulberry32(seed + 22222);
+    const regionCount = Math.max(2, Math.min(8, Math.round(cellCount / 60)));
+    const regionOf = assignNamingRegions(mesh.cells, regionCount, regionRng);
+
+    // Hydrology: a deterministic function of heights/seaLevel. The cosmetic
+    // river-curve wobble stays a per-render concern (this session's earlier
+    // per-segment jitter was replaced by whole-chain chaikinSmooth
+    // threading -- see the river rendering pass below), but the underlying
+    // flow/downhill/lake data and river threshold are pure functions of the
+    // cached height field and belong here.
     let flow = null, downhill = null, isLake = null, riverThreshold = Infinity;
-    // Cells whose own flow qualifies as a river, or their direct neighbors --
-    // both the moisture bump below and the settlement-scoring bonus further
-    // down read this same set, so "near a river" means one consistent thing
-    // everywhere in this generator.
     const nearRiver = new Float64Array(mesh.cells.length);
     if (riversOn) {
       const hydro = computeHydrology(mesh.cells, heights, seaLevel);
@@ -654,131 +682,322 @@ function renderOverworldMap(container) {
       }
     }
 
-    // `biome` is the LIVE classification (Vegetation/Ruggedness sliders
-    // applied) used for the actual fill colors/texture/legend/theme-
-    // suggestion stats below. `refBiome` is always the *unbiased* (bias=0)
-    // classification -- settlement placement, naming regions, and road
-    // routing all key off refBiome instead, so dragging a slider only
-    // repaints the terrain's coloring and never moves a settlement, renames
-    // a region, or reroutes a road. Height/moisture themselves never change
-    // either way -- only which biome label a given (h, m) pair maps to.
-    const cellData = mesh.cells.map((cell, i) => {
-      const h = heights[i];
+    // Moisture (river-adjacency bump already folded in) and refBiome are
+    // both bias-independent -- forestBias/ruggedBias only affect the LIVE
+    // `biome` field, computed fresh per render in generate() itself.
+    const moistureSample = makeFbmSampler(mulberry32(seed + 99991), Math.max(1, octaves - 1));
+    const mOf = new Float64Array(mesh.cells.length);
+    const refBiomeOf = new Array(mesh.cells.length);
+    mesh.cells.forEach((cell, i) => {
       let m = moistureSample(cell.x / canvas.width, cell.y / canvas.height);
       m = Math.min(1, m + nearRiver[i] * 0.3);
-      return {
-        cell, h, m,
-        biome: biomeAt(h, m, seaLevel, forestBias, ruggedBias),
-        refBiome: biomeAt(h, m, seaLevel, 0, 0),
-      };
+      mOf[i] = m;
+      refBiomeOf[i] = biomeAt(heights[i], m, seaLevel, 0, 0);
     });
 
     // Resolve each naming region to a phoneme category by tallying its
-    // cells' biomes and taking the majority -- a mountain-heavy region
-    // reads harsher, a coastal one reads watery, purely from word choice.
-    // Uses refBiome so a region's name-flavor stays fixed as the sliders
-    // above sculpt the displayed terrain.
+    // cells' refBiomes and taking the majority.
     const regionBiomeTally = [];
     for (let r = 0; r < regionCount; r++) regionBiomeTally.push({});
-    for (const { cell, refBiome } of cellData) {
-      const tally = regionBiomeTally[regionOf[cell.index]];
-      const category = BIOME_TO_NAME_CATEGORY[refBiome] || 'plains';
+    for (let i = 0; i < mesh.cells.length; i++) {
+      const tally = regionBiomeTally[regionOf[i]];
+      const category = BIOME_TO_NAME_CATEGORY[refBiomeOf[i]] || 'plains';
       tally[category] = (tally[category] || 0) + 1;
     }
     const regionCategory = regionBiomeTally.map((tally) => {
       let best = 'plains', bestCount = -1;
-      for (const category in tally) {
-        if (tally[category] > bestCount) { bestCount = tally[category]; best = category; }
-      }
+      for (const category in tally) { if (tally[category] > bestCount) { bestCount = tally[category]; best = category; } }
       return best;
     });
 
-    // hills/mountains/forest are a continuous painted wash (see
-    // paintWatercolorWash below) rather than a flat per-cell color -- every
-    // WotC reference reviewed for this generator renders those terrain
-    // classes as a soft, mottled wash, never a hard-edged flat fill.
-    // Plains/beach/water/snow keep the original flat fill, matching those
-    // same references (which render those classes plainly too).
-    const OW_WASH_BIOMES = { hills: true, mountains: true, forest: true };
-    for (const { cell, biome } of cellData) {
-      const poly = cell.polygon;
-      if (poly.length < 3) continue;
-      ctx.beginPath();
-      ctx.moveTo(poly[0].x, poly[0].y);
-      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
-      ctx.closePath();
-      let fillColor;
-      if (OW_WASH_BIOMES[biome]) {
-        const tone = biome === 'forest' ? palette.wash.forest : palette.wash.hills;
-        fillColor = `hsl(${tone.h}, ${tone.s}%, ${tone.l}%)`;
-      } else {
-        fillColor = palette.biomes[biome];
+    // Settlements: refBiome-keyed candidate scoring/placement/tiers/names,
+    // matching Phase 9's "sculpt without losing what's already settled".
+    const settleRng = mulberry32(seed + 60606);
+    const nameRng = mulberry32(seed + 33333);
+    const candidates = [];
+    for (let i = 0; i < mesh.cells.length; i++) {
+      const refBiome = refBiomeOf[i];
+      if (refBiome === 'plains' || refBiome === 'beach' || refBiome === 'hills') {
+        const riverBonus = nearRiver[i] > 0 ? 0.25 : 0;
+        candidates.push({ x: mesh.cells[i].x, y: mesh.cells[i].y, index: i, score: settleRng() + (refBiome === 'plains' ? 0.3 : 0) + riverBonus });
       }
-      ctx.fillStyle = fillColor;
-      ctx.fill();
-      // Stroking in the fill's own color papers over hairline seams
-      // between adjacent polygons that floating-point clipping can leave.
-      ctx.strokeStyle = fillColor;
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      if (!OW_WASH_BIOMES[biome]) {
-        const r = Math.sqrt(polygonArea(poly) / Math.PI);
-        paintBiomeTexture(ctx, biome, cell.x, cell.y, r * 2, r * 2, textureRng, palette.ink);
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    const minDist = Math.max(canvas.width, canvas.height) / (settleCount + 1) * 0.6;
+    const settlements = [];
+    for (const c of candidates) {
+      if (settlements.length >= settleCount) break;
+      if (settlements.every((s) => Math.hypot(s.x - c.x, s.y - c.y) >= minDist)) settlements.push(c);
+    }
+    const byScore = settlements.slice().sort((a, b) => b.score - a.score);
+    const cityCount = Math.max(1, Math.round(byScore.length * 0.15));
+    const townCount = Math.max(0, Math.round(byScore.length * 0.35));
+    byScore.forEach((s, i) => {
+      s.tier = i < cityCount ? 'city' : i < cityCount + townCount ? 'town' : 'village';
+      s.name = generateSettlementName(nameRng, s.tier, regionCategory[regionOf[s.index]]);
+    });
+
+    // Roads: MST connection choice AND each connection's actual Dijkstra
+    // route, both computed once here -- neither depends on anything the
+    // live sliders touch, and at this grid's scale (tens of thousands of
+    // nodes) re-running Dijkstra per slider tick is exactly the cost this
+    // cache exists to avoid.
+    const roadPaths = [];
+    if (settlements.length > 1) {
+      const connected = new Set([0]);
+      while (connected.size < settlements.length) {
+        let best = null;
+        for (const i of connected) {
+          for (let j = 0; j < settlements.length; j++) {
+            if (connected.has(j)) continue;
+            const d = Math.hypot(settlements[i].x - settlements[j].x, settlements[i].y - settlements[j].y);
+            if (!best || d < best.d) best = { i, j, d };
+          }
+        }
+        if (!best) break;
+        const a = settlements[best.i], b = settlements[best.j];
+        const path = computeRoadPath(mesh.cells, refBiomeOf, nearRiver, a.index, b.index);
+        if (path && path.length > 1) {
+          const pts = path.map((idx) => ({ x: mesh.cells[idx].x, y: mesh.cells[idx].y }));
+          roadPaths.push(pts.length > 2 ? chaikinSmooth(pts, 1) : pts);
+        } else {
+          // No routable land path (e.g. the two settlements are on separate
+          // islands) -- a direct line still gets drawn rather than silently
+          // vanishing.
+          roadPaths.push([{ x: a.x, y: a.y }, { x: b.x, y: b.y }]);
+        }
+        connected.add(best.j);
       }
     }
 
-    // One paintWatercolorWash() call per contiguous cluster of matching
-    // cells (not per cell) -- extractCoastlineChains is fully generic (a
-    // plain (cellIndex) => boolean predicate, no land/water-specific logic
-    // inside it), so passing a biome-class predicate here extracts one
-    // boundary chain per contiguous hill/mountain or forest mass with no
-    // changes needed to the function itself. Hills and mountains share one
-    // combined wash pass/tone (real reference maps show a single continuous
-    // highland wash, not two abutting flat colors); they stay visually
-    // distinct via the rosette icon pass below instead.
-    if (!fast) {
-      const highlandChains = extractCoastlineChains(mesh.cells, (i) => {
-        const b = cellData[i].biome;
-        return b === 'hills' || b === 'mountains';
-      });
-      for (const chain of highlandChains) {
-        paintWatercolorWash(ctx, chaikinSmooth(chain, 3), washRng, palette.wash.hills, palette.ink, 28);
+    worldCache = {
+      key, mesh, heights, highestPoint, cols, rows, cellW, cellH,
+      mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
+      regionOf, regionCategory, settlements, roadPaths,
+    };
+    return worldCache;
+  }
+
+  // Builds one path from every closed loop in `loops` -- shared by the two
+  // helpers below, which differ only in what they do with that path.
+  function pathFromLoops(loops) {
+    ctx.beginPath();
+    for (const loop of loops) {
+      ctx.moveTo(loop[0].x, loop[0].y);
+      for (let i = 1; i < loop.length; i++) ctx.lineTo(loop[i].x, loop[i].y);
+      ctx.closePath();
+    }
+  }
+  // Fills every closed loop in `loops` together in one path using the
+  // evenodd rule -- correctly punches out interior holes (an enclosed
+  // below-threshold pocket inside an above-threshold region, e.g. a small
+  // lake inside a landmass) and handles any number of disjoint regions at
+  // once, with no separate outer-vs-hole classification needed.
+  function fillLoopsEvenOdd(loops, fillStyle) {
+    if (loops.length === 0) return;
+    ctx.fillStyle = fillStyle;
+    pathFromLoops(loops);
+    ctx.fill('evenodd');
+  }
+  // Clips to the union of `loops` (evenodd) without painting anything --
+  // for restricting a later fill (e.g. the forest wash) to a region already
+  // computed for an earlier fill, instead of re-extracting it.
+  function clipToLoops(loops) {
+    pathFromLoops(loops);
+    ctx.clip('evenodd');
+  }
+
+  // `fast` skips the multi-layer watercolor wash and rosette/tree icon
+  // passes -- the two most expensive additions in this rendering pass --
+  // for the live-dragging Vegetation/Ruggedness feedback loop, which needs
+  // to redraw on every slider tick. The flat band fills (already using the
+  // muted wash tone, not the old saturated flat color) still apply in fast
+  // mode, so a drag-in-progress still looks reasonably close to the final
+  // result, just without the mottled texture until the drag settles
+  // (scheduleLiveRegen's trailing full-quality redraw, wired below) or the
+  // user hits Regenerate/changes the theme.
+  function generate(fast) {
+    const seed = parseInt(container.querySelector('#ow-seed').value, 10) || 1;
+    const cellCount = parseInt(container.querySelector('#ow-cells').value, 10) || 40000;
+    const octaves = parseInt(container.querySelector('#ow-oct').value, 10) || 4;
+    const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
+    const forestBias = parseInt(container.querySelector('#ow-forest-bias').value, 10) / 100;
+    const ruggedBias = parseInt(container.querySelector('#ow-rugged-bias').value, 10) / 100;
+    const island = container.querySelector('#ow-island').checked;
+    const riversOn = container.querySelector('#ow-rivers').checked;
+    const legendOn = container.querySelector('#ow-legend').checked;
+    const settleCount = parseInt(container.querySelector('#ow-settle').value, 10) || 0;
+    const theme = MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
+    const palette = theme.overworld;
+
+    // Thresholds mirror biomeAt's own internal formulas exactly (kept in
+    // sync by hand -- biomeAt still owns per-cell classification for
+    // settlement/road/theme-suggestion logic below; these copies are only
+    // for driving marching-squares contour extraction against the same
+    // continuous fields).
+    const hillsT = Math.max(seaLevel + 0.08, 0.55 - ruggedBias);
+    const mountainsT = Math.max(hillsT + 0.05, 0.7 - ruggedBias);
+    const snowT = Math.max(mountainsT + 0.05, 0.85 - ruggedBias);
+    const forestT = Math.min(0.9, Math.max(0.1, 0.5 - forestBias));
+
+    // Dedicated rngs for every LIVE (per-render) generative concern --
+    // biome texture, wash, grain, border -- fully isolated from each other
+    // and from everything buildWorld() below consumes only on a cache miss
+    // (mesh geometry, erosion, naming, moisture, settlement scoring/names,
+    // road choice). `riverCurveRng`/`nameRng`/`regionRng`/`settleRng` moved
+    // into buildWorld with the concerns they belong to -- river rendering
+    // now threads whole polylines (chaikinSmooth) rather than jittering
+    // each cell-to-cell hop, so the old per-segment curve wobble stream is
+    // gone entirely, not just relocated.
+    const textureRng = mulberry32(seed + 55555);
+    const themeSuggestRng = mulberry32(seed + 67890);
+    const washRng = mulberry32(seed + 44444);
+    const rosetteRng = mulberry32(seed + 88888);
+    const grainRng = mulberry32(seed + 13579);
+    const borderRng = mulberry32(seed + 24680);
+
+    const world = buildWorld(seed, cellCount, octaves, island, seaLevel, riversOn, settleCount);
+    const {
+      mesh, heights, highestPoint, cols, rows, cellW, cellH,
+      mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
+      regionOf, regionCategory, settlements, roadPaths,
+    } = world;
+
+    // `biome` is the LIVE classification (Vegetation/Ruggedness sliders
+    // applied) used for the actual fill colors/texture/legend/theme-
+    // suggestion stats below -- cheap to recompute every render (a plain
+    // threshold check per cell against the already-cached height/moisture).
+    // `refBiome` comes straight from the cache: settlement placement,
+    // naming regions, and road routing were all built against it already,
+    // so dragging a slider only repaints the terrain's coloring and never
+    // moves a settlement, renames a region, or reroutes a road.
+    const cellData = mesh.cells.map((cell, i) => ({
+      cell, h: heights[i], m: mOf[i],
+      biome: biomeAt(heights[i], mOf[i], seaLevel, forestBias, ruggedBias),
+      refBiome: refBiomeOf[i],
+    }));
+
+    // Rendering shifts from per-cell polygon fill (grid cells have none) to
+    // ordered per-band marching-squares contour fill: each successive call
+    // extracts the closed-loop region where the driving field crosses one
+    // threshold (extractFillableRegions handles chain-threading AND
+    // border-stitching for any region touching the canvas edge -- island
+    // mode off, or any landmass spanning the frame, hits this on every
+    // regenerate) and paints it on top of everything painted so far. Because
+    // every height-based band is a superlevel set of the SAME monotonic
+    // height field, this "paint low elevation first, higher elevation over
+    // it" order alone gets nested bands (hills sitting inside a
+    // deepwater-to-snow gradient) AND interior holes (a lake enclosed by a
+    // mountain mass) correct with no separate hole classification: a hole
+    // at a lower true elevation just shows through as whatever was painted
+    // in an earlier, lower-threshold pass. fillLoopsEvenOdd's evenodd rule
+    // additionally handles multiple disjoint regions and any interior holes
+    // *within* one threshold's own extraction, regardless of winding.
+    // Discards sub-cell-scale marching-squares noise (a height field can
+    // cross a threshold by a hair within a single grid block) -- left in,
+    // each such micro-loop still gets a full band fill or (worse) its own
+    // paintWatercolorWash call sized for a real region, reading as a small,
+    // out-of-place dark blob rather than any real terrain feature.
+    const minLoopArea = cellW * cellH * 0.5;
+    const heightAt = (i) => heights[i];
+    ctx.fillStyle = palette.biomes.deepwater;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    fillLoopsEvenOdd(
+      extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel - 0.08, canvas.width, canvas.height, highestPoint, minLoopArea),
+      palette.biomes.shallowwater
+    );
+    const beachLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel, canvas.width, canvas.height, highestPoint, minLoopArea);
+    fillLoopsEvenOdd(beachLoops, palette.biomes.beach);
+    const landLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel + 0.03, canvas.width, canvas.height, highestPoint, minLoopArea);
+    fillLoopsEvenOdd(landLoops, palette.biomes.plains);
+
+    // Fixed-pixel texture scatter (tree/rosette/plains-lean/beach-dot/snow-
+    // cross), replacing the old one-call-per-Voronoi-cell placement -- the
+    // grid has far more, far smaller cells than the old mesh, so iterating
+    // it directly would place tens of thousands of icons. Sampling at a
+    // fixed pixel spacing instead decouples icon density from the terrain
+    // grid's own resolution, matching roughly the old default's visual
+    // density regardless of how high the Cells slider is set. Each sample
+    // looks up its biome via an O(1) nearest-grid-cell index, not a
+    // point-in-polygon test against a marching-squares contour's (much
+    // larger) vertex list.
+    const spacing = Math.max(16, Math.min(canvas.width, canvas.height) / 24);
+    function biomeAtPoint(x, y) {
+      const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
+      const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
+      return cellData[gy * cols + gx].biome;
+    }
+    for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
+      for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
+        const px = sx + (textureRng() - 0.5) * spacing * 0.6;
+        const py = sy + (textureRng() - 0.5) * spacing * 0.6;
+        const biome = biomeAtPoint(px, py);
+        if (biome === 'hills' || biome === 'mountains' || biome === 'forest') continue; // wash+icon pass below, gated by !fast
+        paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink);
       }
-      const forestChains = extractCoastlineChains(mesh.cells, (i) => cellData[i].biome === 'forest');
-      for (const chain of forestChains) {
-        paintWatercolorWash(ctx, chaikinSmooth(chain, 3), washRng, palette.wash.forest, palette.ink, 28);
+    }
+
+    if (!fast) {
+      // Forest wash: a contour on MOISTURE (not height), clipped to the
+      // land-beyond-beach region above so a moist beach/water cell can never
+      // become forest -- any forest wash that lands at hills-or-higher
+      // elevation gets correctly overpainted by the hills/mountains wash
+      // painted next, so this needs no upper height bound of its own.
+      const moistAt = (i) => cellData[i].m;
+      let wettestIdx = 0;
+      for (let i = 1; i < cellData.length; i++) if (cellData[i].m > cellData[wettestIdx].m) wettestIdx = i;
+      const wettestPoint = { x: mesh.cells[wettestIdx].x, y: mesh.cells[wettestIdx].y };
+      const forestLoops = extractFillableRegions(cols, rows, cellW, cellH, moistAt, forestT, canvas.width, canvas.height, wettestPoint, minLoopArea);
+      if (forestLoops.length > 0) {
+        ctx.save();
+        clipToLoops(landLoops.length ? landLoops : beachLoops);
+        for (const group of groupChainsIntoLoops(forestLoops)) {
+          paintWatercolorWash(ctx, group, washRng, palette.wash.forest, palette.ink, 28);
+        }
+        ctx.restore();
       }
 
-      // Icon texture for hills/mountains/forest, drawn after the wash so it
-      // sits crisply on top of the painted texture rather than underneath it.
-      for (const { cell, biome } of cellData) {
-        if (cell.polygon.length < 3) continue;
-        const r = Math.sqrt(polygonArea(cell.polygon) / Math.PI);
-        if (biome === 'hills' || biome === 'mountains') {
-          paintRosetteTexture(ctx, cell.x, cell.y, r * 2, r * 2, rosetteRng, palette.ink, biome === 'mountains');
-        } else if (biome === 'forest') {
-          paintBiomeTexture(ctx, biome, cell.x, cell.y, r * 2, r * 2, textureRng, palette.ink);
+      // Hills+mountains+snow wash: one combined highland tone (matching
+      // real reference maps, which show a single continuous highland wash
+      // rather than two abutting flat colors); hills/mountains stay visually
+      // distinct via the rosette icon pass, snow via its own flat fill on
+      // top afterward.
+      const highlandLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, hillsT, canvas.width, canvas.height, highestPoint, minLoopArea);
+      for (const group of groupChainsIntoLoops(highlandLoops)) {
+        paintWatercolorWash(ctx, group, washRng, palette.wash.hills, palette.ink, 28);
+      }
+
+      for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
+        for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
+          const px = sx + (textureRng() - 0.5) * spacing * 0.6;
+          const py = sy + (textureRng() - 0.5) * spacing * 0.6;
+          const biome = biomeAtPoint(px, py);
+          if (biome === 'hills' || biome === 'mountains') {
+            paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, biome === 'mountains');
+          } else if (biome === 'forest') {
+            paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink);
+          }
         }
       }
     }
 
-    // Coastline smoothing, plus the extra-ink glow/stroke treatment below
-    // that's specific to the land/water boundary (a coastline reads as more
-    // significant than a biome-to-biome seam, so it gets its own emphasis).
-    // Plains/beach/snow/water biome-to-biome boundaries still meet at a
-    // hard polygon edge -- those biomes keep their original flat per-cell
-    // fill -- but hills/mountains/forest no longer do; their boundary is
-    // now the same smoothed chain the watercolor wash above was painted
-    // against. Pure deterministic post-process over already-generated
-    // points, so it carries no rng/seed risk at all.
-    const isLand = (i) => heights[i] >= seaLevel;
-    const coastChains = extractCoastlineChains(mesh.cells, isLand);
+    // Snow flat-fills last, on top of the highland wash's peak.
+    fillLoopsEvenOdd(
+      extractFillableRegions(cols, rows, cellW, cellH, heightAt, snowT, canvas.width, canvas.height, highestPoint, minLoopArea),
+      palette.biomes.snow
+    );
+
+    // Coastline: the same land/water threshold as the beach fill above,
+    // reused rather than re-extracted -- the extra-ink glow/stroke below is
+    // specific to the land/water boundary (it reads as more significant
+    // than a biome-to-biome seam), so it still gets its own emphasis pass.
     ctx.lineJoin = 'round';
-    for (const chain of coastChains) {
+    for (const chain of beachLoops) {
       const smoothed = chaikinSmooth(chain, 3);
       ctx.beginPath();
       ctx.moveTo(smoothed[0].x, smoothed[0].y);
       for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
+      ctx.closePath();
       // A soft glow band under the crisp ink line -- the same path stroked
       // twice, wide/faint then thin/solid -- echoes the halo published maps
       // often put around a coastline instead of a single flat rule.
@@ -793,109 +1012,80 @@ function renderOverworldMap(container) {
 
     let riverSegmentCount = 0;
     if (riversOn) {
-      const avgSpacing = Math.sqrt((canvas.width * canvas.height) / Math.max(1, cellCount));
+      // River networks are threaded into whole polylines (source to sea),
+      // not stroked as thousands of individual tiny cell-to-cell hops the
+      // way the old, much coarser Voronoi mesh could get away with -- at
+      // grid resolution each hop is only a couple pixels, so per-hop
+      // stroking would mean tens of thousands of draw calls for a jagged,
+      // not smoother, result. A cell is a river "source" if it qualifies
+      // but has no qualifying upstream neighbor already draining into it;
+      // walking downhill from each source and stopping at an
+      // already-visited (already-drawn) cell avoids re-stroking a shared
+      // trunk once two branches merge. Line width is set once per chain
+      // from its widest (most downstream) point rather than tapering
+      // per-hop -- a deliberate simplification versus the old per-segment
+      // taper, easy to revisit after this pass gets a visual look.
+      const n = mesh.cells.length;
+      const hasUpstream = new Uint8Array(n);
+      for (let i = 0; i < n; i++) {
+        if (flow[i] >= riverThreshold && downhill[i] !== -1) hasUpstream[downhill[i]] = 1;
+      }
+      const visitedDown = new Uint8Array(n);
+      ctx.strokeStyle = palette.river;
       ctx.lineCap = 'round';
-      for (let i = 0; i < mesh.cells.length; i++) {
-        if (downhill[i] === -1 || flow[i] < riverThreshold) continue;
-        riverSegmentCount++;
-        const a = mesh.cells[i], b = mesh.cells[downhill[i]];
-        ctx.strokeStyle = palette.river;
-        ctx.lineWidth = Math.min(6, 1 + Math.sqrt(flow[i] / riverThreshold));
+      ctx.lineJoin = 'round';
+      for (let s = 0; s < n; s++) {
+        if (flow[s] < riverThreshold || hasUpstream[s]) continue;
+        const chain = [{ x: mesh.cells[s].x, y: mesh.cells[s].y }];
+        let maxFlow = flow[s];
+        let cur = s;
+        for (;;) {
+          const next = downhill[cur];
+          if (next === -1) break;
+          chain.push({ x: mesh.cells[next].x, y: mesh.cells[next].y });
+          maxFlow = Math.max(maxFlow, flow[next]);
+          riverSegmentCount++;
+          if (visitedDown[next]) break; // merged into an already-drawn trunk
+          visitedDown[next] = 1;
+          if (heights[next] < seaLevel || flow[next] < riverThreshold) break; // reached the sea
+          cur = next;
+        }
+        if (chain.length < 2) continue;
+        const smoothed = chaikinSmooth(chain, 2);
+        ctx.lineWidth = Math.min(6, 1 + Math.sqrt(maxFlow / riverThreshold));
         ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        const midX = (a.x + b.x) / 2 + (riverCurveRng() - 0.5) * avgSpacing * 0.4;
-        const midY = (a.y + b.y) / 2 + (riverCurveRng() - 0.5) * avgSpacing * 0.4;
-        ctx.quadraticCurveTo(midX, midY, b.x, b.y);
+        ctx.moveTo(smoothed[0].x, smoothed[0].y);
+        for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
         ctx.stroke();
       }
-      ctx.fillStyle = palette.lake;
-      for (let i = 0; i < mesh.cells.length; i++) {
-        if (!isLake[i] || flow[i] < 2) continue; // a local minimum with no upstream drainage isn't a meaningful lake
-        const r = Math.max(3, Math.min(10, 2 + Math.sqrt(flow[i])));
-        ctx.beginPath();
-        ctx.arc(mesh.cells[i].x, mesh.cells[i].y, r, 0, Math.PI * 2);
-        ctx.fill();
+
+      // Lakes as real extracted shapes (marching squares on the isLake
+      // flag, same machinery as every other band above) instead of a
+      // per-cell dot scatter -- a lake spanning several adjacent grid cells
+      // reads as one clean blob rather than a cluster of overlapping
+      // circles.
+      const lakeVal = (i) => (isLake[i] && flow[i] >= 2 ? 1 : 0);
+      let lakeSeedIdx = -1;
+      for (let i = 0; i < n; i++) if (lakeVal(i)) { lakeSeedIdx = i; break; }
+      if (lakeSeedIdx !== -1) {
+        const lakeInsidePoint = { x: mesh.cells[lakeSeedIdx].x, y: mesh.cells[lakeSeedIdx].y };
+        const lakeLoops = extractFillableRegions(cols, rows, cellW, cellH, lakeVal, 0.5, canvas.width, canvas.height, lakeInsidePoint, minLoopArea);
+        fillLoopsEvenOdd(lakeLoops, palette.lake);
       }
     }
 
-    // Uses refBiome (not the live-biased biome) so settlement placement
-    // itself -- which cells qualify, their scores, their count -- never
-    // shifts as the Vegetation/Ruggedness sliders move, matching Phase 9's
-    // "sculpt without losing what's already settled" requirement.
-    const candidates = [];
-    for (const { cell, refBiome } of cellData) {
-      if (cell.polygon.length < 3) continue;
-      if (refBiome === 'plains' || refBiome === 'beach' || refBiome === 'hills') {
-        const riverBonus = nearRiver[cell.index] > 0 ? 0.25 : 0;
-        candidates.push({ x: cell.x, y: cell.y, index: cell.index, score: rng() + (refBiome === 'plains' ? 0.3 : 0) + riverBonus });
-      }
-    }
-    candidates.sort((a, b) => b.score - a.score);
-    const minDist = Math.max(canvas.width, canvas.height) / (settleCount + 1) * 0.6;
-    const settlements = [];
-    for (const c of candidates) {
-      if (settlements.length >= settleCount) break;
-      if (settlements.every((s) => Math.hypot(s.x - c.x, s.y - c.y) >= minDist)) {
-        settlements.push(c);
-      }
-    }
-
-    // Rank by score to assign settlement tiers -- the greedy min-distance
-    // selection above already tends to add settlements in roughly
-    // descending score order, but re-sort explicitly rather than relying
-    // on that as a guarantee. Tiers are cosmetic (marker size, label
-    // weight, name-suffix flavor) and never feed back into placement.
-    const byScore = settlements.slice().sort((a, b) => b.score - a.score);
-    const cityCount = Math.max(1, Math.round(byScore.length * 0.15));
-    const townCount = Math.max(0, Math.round(byScore.length * 0.35));
-    byScore.forEach((s, i) => {
-      s.tier = i < cityCount ? 'city' : i < cityCount + townCount ? 'town' : 'village';
-      s.name = generateSettlementName(nameRng, s.tier, regionCategory[regionOf[s.index]]);
-    });
-
-    // Roads: which settlement pairs to connect still comes from a simple
-    // nearest-neighbor MST over straight-line distance (a reasonable, cheap
-    // heuristic for "does a road exist between these two places" -- real
-    // road *networks* aren't full shortest-path meshes either). What
-    // changed is how each chosen connection is drawn: instead of a single
-    // jittered curve, it's an actual Dijkstra route over the mesh that
-    // prefers plains/beach and avoids mountains and open water.
+    // Settlements and roadPaths come straight from the cache (world) --
+    // candidate scoring, placement, tiers, names, MST choice, and each
+    // connection's Dijkstra route were all computed once in buildWorld(),
+    // since none of it depends on anything the live sliders touch. Here we
+    // only draw them.
     ctx.strokeStyle = palette.road;
     ctx.lineWidth = 2;
-    if (settlements.length > 1) {
-      // Also refBiome -- roads shouldn't visibly reroute every time the
-      // Vegetation/Ruggedness sliders move, since they were built for the
-      // terrain as it was when the settlements themselves were placed.
-      const biomeOf = cellData.map((d) => d.refBiome);
-      const connected = new Set([0]);
-      while (connected.size < settlements.length) {
-        let best = null;
-        for (const i of connected) {
-          for (let j = 0; j < settlements.length; j++) {
-            if (connected.has(j)) continue;
-            const d = Math.hypot(settlements[i].x - settlements[j].x, settlements[i].y - settlements[j].y);
-            if (!best || d < best.d) best = { i, j, d };
-          }
-        }
-        if (!best) break;
-        const a = settlements[best.i], b = settlements[best.j];
-        const path = computeRoadPath(mesh.cells, biomeOf, nearRiver, a.index, b.index);
-        ctx.beginPath();
-        if (path && path.length > 1) {
-          const pts = path.map((idx) => ({ x: mesh.cells[idx].x, y: mesh.cells[idx].y }));
-          const smoothed = pts.length > 2 ? chaikinSmooth(pts, 1) : pts;
-          ctx.moveTo(smoothed[0].x, smoothed[0].y);
-          for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
-        } else {
-          // No routable land path (e.g. the two settlements are on
-          // separate islands) -- fall back to a direct line so a
-          // connection still gets drawn rather than silently vanishing.
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
-        }
-        ctx.stroke();
-        connected.add(best.j);
-      }
+    for (const pts of roadPaths) {
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
     }
 
     for (const s of settlements) {
