@@ -30,23 +30,38 @@
 
 <main id="app"></main>
 
-<script src="auth-gate.js"></script>
-<script src="lib/api.js"></script>
-<script src="lib/wikilink.js"></script>
-<script src="lib/noise.js"></script>
-<script src="lib/voronoi-mesh.js"></script>
-<script src="lib/terrain-grid.js"></script>
-<script src="lib/watercolor-wash.js"></script>
-<script src="lib/hydrology.js"></script>
-<script src="lib/map-themes.js"></script>
-<script src="lib/settlement-names.js"></script>
-<script src="lib/campaign-themes.js"></script>
-<script src="views/library.js"></script>
-<script src="views/campaign.js"></script>
-<script src="views/new-note.js"></script>
-<script src="views/map-dungeon.js"></script>
-<script src="views/map-overworld.js"></script>
-<script src="views/map-settlement.js"></script>
-<script src="app.js"></script>
+<!-- Cache-busting: every script tag shares one `v` query param, bumped
+     together on any deploy that touches JS. Without this, a returning
+     visitor's browser can revalidate/refetch these files independently
+     (different original fetch times => different effective cache
+     lifetimes under Cloudflare's max-age=14400), so a page load can end up
+     mixing an old cached file with a new one. Confirmed in production:
+     stale lib/noise.js (pre-dating makeRidgedFbmSampler) paired with a
+     fresh views/map-overworld.js (which calls it) threw immediately, and
+     since the overworld canvas has an explicit `background: #000` in
+     styles.css, an unpainted canvas rendered as a literal solid black box
+     -- reported by the account owner and reproduced exactly by replaying
+     that old/new file pairing. Bumping `v` here forces every script to be
+     refetched together the next time a visitor's browser fetches this
+     (also-cached, but shorter-lived in practice since it's the page itself)
+     index.html, so they can never end up with a same-deploy mismatch again. -->
+<script src="auth-gate.js?v=2"></script>
+<script src="lib/api.js?v=2"></script>
+<script src="lib/wikilink.js?v=2"></script>
+<script src="lib/noise.js?v=2"></script>
+<script src="lib/voronoi-mesh.js?v=2"></script>
+<script src="lib/terrain-grid.js?v=2"></script>
+<script src="lib/watercolor-wash.js?v=2"></script>
+<script src="lib/hydrology.js?v=2"></script>
+<script src="lib/map-themes.js?v=2"></script>
+<script src="lib/settlement-names.js?v=2"></script>
+<script src="lib/campaign-themes.js?v=2"></script>
+<script src="views/library.js?v=2"></script>
+<script src="views/campaign.js?v=2"></script>
+<script src="views/new-note.js?v=2"></script>
+<script src="views/map-dungeon.js?v=2"></script>
+<script src="views/map-overworld.js?v=2"></script>
+<script src="views/map-settlement.js?v=2"></script>
+<script src="app.js?v=2"></script>
 </body>
 </html>
