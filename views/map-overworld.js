@@ -206,6 +206,36 @@ const OW_TIER_FONT = {
   city: `bold 14px ${OW_SERIF}`,
 };
 
+function hexLightness(hex) {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return 50;
+  const r = parseInt(m[1], 16), g = parseInt(m[2], 16), b = parseInt(m[3], 16);
+  return ((Math.max(r, g, b) + Math.min(r, g, b)) / 2 / 255) * 100;
+}
+
+// Region-name text colored to match the terrain underneath it (green over
+// forest, brown/olive over hills) instead of one fixed ink color for every
+// label -- a consistent convention across every WotC reference reviewed.
+// Reuses the wash palette's own hue/saturation rather than adding new
+// per-biome label colors. Whether that hue needs to go darker or lighter
+// for legibility depends on the theme, not the wash tone's own absolute
+// lightness (the wash tones are all moderately dark by design after this
+// session's own contrast fix, regardless of whether the theme they belong
+// to is otherwise light or dark) -- inferred from the theme's existing
+// `label` color, which is already correctly tuned per theme (dark ink on
+// parchment/modern's light terrain, light ink on grim's dark terrain).
+// Plains/beach/snow/water fall back to the theme's plain label ink,
+// matching how those biomes keep their original flat, unwashed treatment.
+function labelColorFor(biome, palette) {
+  const tone = biome === 'forest' ? palette.wash.forest
+    : (biome === 'hills' || biome === 'mountains') ? palette.wash.hills
+    : null;
+  if (!tone) return palette.label;
+  const themeIsDark = hexLightness(palette.label) > 50;
+  const targetL = themeIsDark ? Math.min(92, tone.l + 45) : Math.max(8, tone.l - 22);
+  return `hsl(${tone.h}, ${Math.min(100, tone.s + 15)}%, ${targetL}%)`;
+}
+
 // Settlement iconography: a pictorial glyph per tier rather than an
 // abstract shape, echoing published-map settlement symbols -- village is a
 // small hut, town a single tower, city a three-towered castle -- so tier
@@ -275,12 +305,81 @@ function drawMapLegend(ctx, canvas, palette) {
   ctx.restore();
 }
 
-// A soft radial vignette plus an ornate double-line border with corner
-// flourishes -- drawn last, over everything else, so it reads as the map's
-// frame rather than something terrain/roads/settlements could cover.
-// Reuses palette.coastline (already the map's boldest ink accent) rather
-// than adding a new theme key.
-function drawMapVignetteAndBorder(ctx, canvas, ink) {
+// Canvas-wide paper-grain mottling, reusing the same makeFbmSampler
+// infrastructure lib/noise.js already provides for height/moisture --
+// samples a coarse noise field to bias where blotches land (denser/darker
+// in low-noise pockets) rather than scattering uniformly at random, which
+// would read as flat static instead of the uneven, clouded look real
+// parchment has. Drawn once per generate() over the whole canvas, after
+// terrain/roads/settlements and before the legend/border, so it reads as
+// the page's own material showing through rather than a terrain feature.
+// `grain` is the theme's { dark, light, intensity } palette entry --
+// intensity lets a theme (Modern Cartography) opt into only a whisper of
+// this without a separate code path.
+function paintParchmentGrain(ctx, canvas, rng, grain) {
+  if (!grain || grain.intensity <= 0) return;
+  const w = canvas.width, h = canvas.height;
+  const noiseSample = makeFbmSampler(rng, 4);
+  // Fine-grained on purpose: an early tuning used a coarse ~15px grid,
+  // which at this canvas size reads as distinct soft blobs (looked like
+  // mold on the water, not paper fiber) rather than a subtle texture. Real
+  // paper grain is much finer than any other texture pass on this map.
+  const cols = 130;
+  const rows = Math.max(1, Math.round((cols * h) / w));
+  const cellW = w / cols, cellH = h / rows;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const u = c / cols, v = r / rows;
+      const n = noiseSample(u, v);
+      const cx = (c + 0.5) * cellW + (rng() - 0.5) * cellW;
+      const cy = (r + 0.5) * cellH + (rng() - 0.5) * cellH;
+      const radius = Math.max(0.5, cellW * (0.3 + rng() * 0.4));
+      const dark = n < 0.5;
+      const tone = dark ? grain.dark : grain.light;
+      ctx.globalCompositeOperation = dark ? 'multiply' : 'lighten';
+      const alpha = (dark ? 0.025 : 0.015) * grain.intensity;
+      ctx.fillStyle = `rgba(${tone.r},${tone.g},${tone.b},${alpha})`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// A concentric-ring medallion with a small four-pointed glyph at its
+// center -- the corner-medallion motif every ornate-bordered reference map
+// (Dessarin Valley, Vaasa) uses, in place of this border's previous plain
+// L-shaped bracket.
+function drawCornerMedallion(ctx, x, y, ink) {
+  ctx.save();
+  ctx.strokeStyle = ink;
+  ctx.globalAlpha = 0.8;
+  ctx.lineWidth = 1.4;
+  ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2); ctx.stroke();
+  ctx.lineWidth = 0.8;
+  ctx.beginPath(); ctx.arc(x, y, 8.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = ink;
+  ctx.globalAlpha = 0.85;
+  const r = 3.4;
+  ctx.beginPath();
+  ctx.moveTo(x, y - r); ctx.lineTo(x + r * 0.4, y - r * 0.4);
+  ctx.lineTo(x + r, y); ctx.lineTo(x + r * 0.4, y + r * 0.4);
+  ctx.lineTo(x, y + r); ctx.lineTo(x - r * 0.4, y + r * 0.4);
+  ctx.lineTo(x - r, y); ctx.lineTo(x - r * 0.4, y - r * 0.4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+// A soft radial vignette, an ornate double-line border with corner
+// medallions, and a speckled "aged edge" band -- drawn last, over
+// everything else, so it reads as the map's frame rather than something
+// terrain/roads/settlements could cover. Reuses palette.coastline (already
+// the map's boldest ink accent) rather than adding a new theme key. `rng`
+// is a dedicated stream (the aged-edge speckle positions) so this stays
+// reproducible per seed like every other generative pass here.
+function drawMapVignetteAndBorder(ctx, canvas, ink, rng) {
   const w = canvas.width, h = canvas.height;
   const grad = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.32, w / 2, h / 2, Math.max(w, h) * 0.72);
   grad.addColorStop(0, 'rgba(0,0,0,0)');
@@ -297,14 +396,31 @@ function drawMapVignetteAndBorder(ctx, canvas, ink) {
   ctx.lineWidth = 1.2;
   ctx.strokeRect(inset + 7, inset + 7, w - (inset + 7) * 2, h - (inset + 7) * 2);
 
-  const cs = 18;
-  ctx.lineWidth = 2;
-  for (const [x, y, dx, dy] of [[inset, inset, 1, 1], [w - inset, inset, -1, 1], [inset, h - inset, 1, -1], [w - inset, h - inset, -1, -1]]) {
+  // Aged edge: a band of small speckles just inside the border, denser
+  // near the frame itself and thinning toward the map -- reads as foxing
+  // / worn-parchment marks along the page's edge rather than random noise.
+  const band = 26;
+  const edgeSpeckles = Math.round(((w + h) * 2 * band) / 900);
+  ctx.globalAlpha = 1;
+  for (let i = 0; i < edgeSpeckles; i++) {
+    const side = Math.floor(rng() * 4);
+    const along = rng();
+    const depth = rng() * rng() * band; // squared bias -- clusters nearer the frame
+    let sx, sy;
+    if (side === 0) { sx = along * w; sy = inset + depth; }
+    else if (side === 1) { sx = w - inset - depth; sy = along * h; }
+    else if (side === 2) { sx = along * w; sy = h - inset - depth; }
+    else { sx = inset + depth; sy = along * h; }
+    ctx.fillStyle = ink;
+    ctx.globalAlpha = 0.12 + rng() * 0.15;
     ctx.beginPath();
-    ctx.moveTo(x, y + dy * cs);
-    ctx.lineTo(x, y);
-    ctx.lineTo(x + dx * cs, y);
-    ctx.stroke();
+    ctx.arc(sx, sy, 0.6 + rng() * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const [x, y] of [[inset, inset], [w - inset, inset], [inset, h - inset], [w - inset, h - inset]]) {
+    drawCornerMedallion(ctx, x, y, ink);
   }
   ctx.restore();
 }
@@ -487,6 +603,8 @@ function renderOverworldMap(container) {
     const themeSuggestRng = mulberry32(seed + 67890);
     const washRng = mulberry32(seed + 44444);
     const rosetteRng = mulberry32(seed + 88888);
+    const grainRng = mulberry32(seed + 13579);
+    const borderRng = mulberry32(seed + 24680);
 
     const mesh = buildVoronoiMesh(meshRng, canvas.width, canvas.height, cellCount);
 
@@ -793,16 +911,20 @@ function renderOverworldMap(container) {
         ctx.stroke();
       }
       ctx.font = OW_TIER_FONT[s.tier];
-      ctx.fillStyle = palette.label;
+      // refBiome, not the live-biased biome -- matches convention #3
+      // (settlement-adjacent visuals stay fixed under the live sliders).
+      ctx.fillStyle = labelColorFor(cellData[s.index].refBiome, palette);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText(s.name, px, py + r + 3);
     }
 
+    paintParchmentGrain(ctx, canvas, grainRng, palette.grain);
+
     if (legendOn) drawMapLegend(ctx, canvas, palette);
 
     drawCompassRose(ctx, canvas.width - 50, 50, 28, palette.coastline);
-    drawMapVignetteAndBorder(ctx, canvas, palette.coastline);
+    drawMapVignetteAndBorder(ctx, canvas, palette.coastline, borderRng);
 
     // Suggested campaign theme: a heuristic read of this specific map's own
     // statistics (biome mix, settlement tiers, river count, island-ness),
