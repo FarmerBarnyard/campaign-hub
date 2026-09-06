@@ -627,15 +627,43 @@ function renderOverworldMap(container) {
     const mesh = buildTerrainGrid(meshRng, canvas.width, canvas.height, cellCount);
     const { cols, rows, cellW, cellH } = mesh;
 
+    // Height = isotropic base terrain (rolling variation, unchanged) +
+    // a RIDGED mountain layer, sampled through a rotated/stretched
+    // coordinate frame so it reads as one range with a real long axis
+    // instead of isotropic noise thresholded into round, disconnected
+    // blobs -- confirmed as the actual complaint (not a guess) via
+    // AskUserQuestion after the account owner rejected the first grid+
+    // erosion pass outright: "landmass is a blob", "mountains are round
+    // dots, not ranges", "rivers are too sparse/short". Island-mode falloff
+    // is no longer a plain circle: the cutoff radius itself varies by
+    // angle (a handful of random sine harmonics, much lower frequency than
+    // either noise layer), so the coastline's GROSS shape has real
+    // large-scale bays/headlands instead of erosion just adding fine
+    // wiggle to a mathematically perfect circle. Both new noise layers
+    // live in lib/noise.js; validated in a standalone prototype across 8
+    // seeds (elongated/irregular landmasses, ridge-following highland
+    // wash, 9-23 rivers per map vs. the single-digit count before) before
+    // being wired in here.
     const heightRng = mulberry32(seed);
     const heightSample = makeFbmSampler(heightRng, octaves);
+    const ridgeRng = mulberry32(seed + 70707);
+    const ridgeAngle = ridgeRng() * Math.PI;
+    const baseRidged = makeRidgedFbmSampler(ridgeRng, Math.min(5, octaves + 1));
+    const ridgedSample = makeAnisotropicSampler(baseRidged, ridgeAngle, 1.0, 2.8);
+    const islandRng = mulberry32(seed + 80808);
+    const radiusWobble = makeRadialWobbleSampler(islandRng, 6);
     const heights = new Float64Array(mesh.cells.length);
     const cx = canvas.width / 2, cy = canvas.height / 2, maxD = Math.hypot(cx, cy);
     mesh.cells.forEach((cell, i) => {
-      let h = heightSample(cell.x / canvas.width, cell.y / canvas.height);
+      const u = cell.x / canvas.width, v = cell.y / canvas.height;
+      let h = heightSample(u, v) * 0.5 + ridgedSample(u, v) * 0.75;
       if (island) {
-        const d = Math.hypot(cell.x - cx, cell.y - cy) / maxD;
-        h *= Math.max(0, 1 - d * d * 1.3);
+        const dx = cell.x - cx, dy = cell.y - cy;
+        const theta = Math.atan2(dy, dx);
+        const dist = Math.hypot(dx, dy) / maxD;
+        const effectiveMaxDist = 0.72 + radiusWobble(theta) * 0.32;
+        const t = dist / effectiveMaxDist;
+        h *= Math.max(0, 1 - t * t * 1.3);
       }
       heights[i] = h;
     });
@@ -650,10 +678,6 @@ function renderOverworldMap(container) {
     applyHydraulicErosion(heights, cols, rows, erosionRng, {});
     applyThermalErosion(heights, cols, rows, 3, 0.025, 0.5);
     fillPits(heights, cols, rows, seaLevel);
-
-    let highestIdx = 0;
-    for (let i = 1; i < heights.length; i++) if (heights[i] > heights[highestIdx]) highestIdx = i;
-    const highestPoint = { x: mesh.cells[highestIdx].x, y: mesh.cells[highestIdx].y };
 
     // Naming regions: generic adjacency BFS, independent of biome/height
     // beyond the adjacency graph itself.
@@ -771,7 +795,7 @@ function renderOverworldMap(container) {
     }
 
     worldCache = {
-      key, mesh, heights, highestPoint, cols, rows, cellW, cellH,
+      key, mesh, heights, cols, rows, cellW, cellH,
       mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
       regionOf, regionCategory, settlements, roadPaths,
     };
@@ -858,7 +882,7 @@ function renderOverworldMap(container) {
 
     const world = buildWorld(seed, cellCount, octaves, island, seaLevel, riversOn, settleCount);
     const {
-      mesh, heights, highestPoint, cols, rows, cellW, cellH,
+      mesh, heights, cols, rows, cellW, cellH,
       mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
       regionOf, regionCategory, settlements, roadPaths,
     } = world;
@@ -903,12 +927,12 @@ function renderOverworldMap(container) {
     ctx.fillStyle = palette.biomes.deepwater;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     fillLoopsEvenOdd(
-      extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel - 0.08, canvas.width, canvas.height, highestPoint, minLoopArea),
+      extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel - 0.08, canvas.width, canvas.height, minLoopArea),
       palette.biomes.shallowwater
     );
-    const beachLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel, canvas.width, canvas.height, highestPoint, minLoopArea);
+    const beachLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel, canvas.width, canvas.height, minLoopArea);
     fillLoopsEvenOdd(beachLoops, palette.biomes.beach);
-    const landLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel + 0.03, canvas.width, canvas.height, highestPoint, minLoopArea);
+    const landLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel + 0.03, canvas.width, canvas.height, minLoopArea);
     fillLoopsEvenOdd(landLoops, palette.biomes.plains);
 
     // Fixed-pixel texture scatter (tree/rosette/plains-lean/beach-dot/snow-
@@ -938,16 +962,24 @@ function renderOverworldMap(container) {
     }
 
     if (!fast) {
-      // Forest wash: a contour on MOISTURE (not height), clipped to the
-      // land-beyond-beach region above so a moist beach/water cell can never
-      // become forest -- any forest wash that lands at hills-or-higher
-      // elevation gets correctly overpainted by the hills/mountains wash
-      // painted next, so this needs no upper height bound of its own.
-      const moistAt = (i) => cellData[i].m;
-      let wettestIdx = 0;
-      for (let i = 1; i < cellData.length; i++) if (cellData[i].m > cellData[wettestIdx].m) wettestIdx = i;
-      const wettestPoint = { x: mesh.cells[wettestIdx].x, y: mesh.cells[wettestIdx].y };
-      const forestLoops = extractFillableRegions(cols, rows, cellW, cellH, moistAt, forestT, canvas.width, canvas.height, wettestPoint, minLoopArea);
+      // Forest wash: a contour on MOISTURE (not height) -- but moisture
+      // itself is sampled over the WHOLE canvas independent of land/water
+      // (unlike height, it was never masked to the landmass), so a raw
+      // moisture threshold can flag a high-moisture patch out in open
+      // ocean, far from any coastline. Such a patch routinely touches all
+      // four canvas edges (nothing ties it to where the actual coastline
+      // is), and border-stitching that into a loop produced a near-
+      // full-canvas region that then got misread as almost entirely
+      // "hole" once grouped -- the forest wash silently painted nothing
+      // anywhere, confirmed by sampling known forest cells and finding
+      // the plains color underneath instead. Masking moisture to land
+      // (anything below the beach-or-higher threshold reads as
+      // definitely-not-forest) before extraction keeps the resulting
+      // region inherently bounded by the real coastline, so it only ever
+      // touches the border when the LAND itself does -- the case
+      // border-stitching is actually meant to handle.
+      const landForestAt = (i) => (heights[i] >= seaLevel + 0.03 ? cellData[i].m : -1);
+      const forestLoops = extractFillableRegions(cols, rows, cellW, cellH, landForestAt, forestT, canvas.width, canvas.height, minLoopArea);
       if (forestLoops.length > 0) {
         ctx.save();
         clipToLoops(landLoops.length ? landLoops : beachLoops);
@@ -962,7 +994,7 @@ function renderOverworldMap(container) {
       // rather than two abutting flat colors); hills/mountains stay visually
       // distinct via the rosette icon pass, snow via its own flat fill on
       // top afterward.
-      const highlandLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, hillsT, canvas.width, canvas.height, highestPoint, minLoopArea);
+      const highlandLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, hillsT, canvas.width, canvas.height, minLoopArea);
       for (const group of groupChainsIntoLoops(highlandLoops)) {
         paintWatercolorWash(ctx, group, washRng, palette.wash.hills, palette.ink, 28);
       }
@@ -983,7 +1015,7 @@ function renderOverworldMap(container) {
 
     // Snow flat-fills last, on top of the highland wash's peak.
     fillLoopsEvenOdd(
-      extractFillableRegions(cols, rows, cellW, cellH, heightAt, snowT, canvas.width, canvas.height, highestPoint, minLoopArea),
+      extractFillableRegions(cols, rows, cellW, cellH, heightAt, snowT, canvas.width, canvas.height, minLoopArea),
       palette.biomes.snow
     );
 
@@ -1065,13 +1097,8 @@ function renderOverworldMap(container) {
       // reads as one clean blob rather than a cluster of overlapping
       // circles.
       const lakeVal = (i) => (isLake[i] && flow[i] >= 2 ? 1 : 0);
-      let lakeSeedIdx = -1;
-      for (let i = 0; i < n; i++) if (lakeVal(i)) { lakeSeedIdx = i; break; }
-      if (lakeSeedIdx !== -1) {
-        const lakeInsidePoint = { x: mesh.cells[lakeSeedIdx].x, y: mesh.cells[lakeSeedIdx].y };
-        const lakeLoops = extractFillableRegions(cols, rows, cellW, cellH, lakeVal, 0.5, canvas.width, canvas.height, lakeInsidePoint, minLoopArea);
-        fillLoopsEvenOdd(lakeLoops, palette.lake);
-      }
+      const lakeLoops = extractFillableRegions(cols, rows, cellW, cellH, lakeVal, 0.5, canvas.width, canvas.height, minLoopArea);
+      fillLoopsEvenOdd(lakeLoops, palette.lake);
     }
 
     // Settlements and roadPaths come straight from the cache (world) --
