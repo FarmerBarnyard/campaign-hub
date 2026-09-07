@@ -18,7 +18,16 @@ function biomeAt(h, moist, seaLevel, forestBias, ruggedBias) {
   if (h > mountainsT) return 'mountains';
   if (h > hillsT) return 'hills';
   const forestT = Math.min(0.9, Math.max(0.1, 0.5 - forestBias));
+  // Barrens mirrors forestT's own pattern at the opposite end of the
+  // moisture range (floored strictly below forestT so forestBias can never
+  // push the two thresholds past each other into a degenerate ordering) --
+  // an arid lowland base biome, previously missing entirely (moisture below
+  // forestT always fell through to plains regardless of how dry). Needed as
+  // the base for the Bloodstone Desert / Salt Flats special-zone reflavors,
+  // which recolor barrens cells rather than inventing their own band.
+  const aridT = Math.max(0, Math.min(forestT - 0.15, 0.22 - forestBias * 0.5));
   if (moist > forestT) return 'forest';
+  if (moist < aridT) return 'barrens';
   return 'plains';
 }
 
@@ -113,6 +122,21 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
       ctx.globalAlpha = 1;
       break;
     }
+    case 'barrens': {
+      // A lone scrub/cracked-ground mark -- sparser than plains' grass tick,
+      // reading as "nothing much grows here" rather than a distinct plant.
+      if (r > 0.25) return;
+      ctx.strokeStyle = ink;
+      ctx.globalAlpha = 0.35;
+      ctx.lineWidth = 1;
+      const s = cw * 0.1;
+      ctx.beginPath();
+      ctx.moveTo(cx - s, cy + s * 0.6); ctx.lineTo(cx + s, cy - s * 0.6);
+      ctx.moveTo(cx - s * 0.3, cy - s); ctx.lineTo(cx + s * 0.5, cy + s * 0.8);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      break;
+    }
   }
 }
 
@@ -155,11 +179,188 @@ function paintRosetteTexture(ctx, cx, cy, cw, ch, rng, ink, bold) {
   ctx.globalAlpha = 1;
 }
 
+// Wild-zone icon glyphs -- one dispatcher covering every iconKey referenced
+// by lib/map-biome-zones.js's three tables (special zones, range zones,
+// point landmarks) plus the Scrying Pool decoration, all drawn with the
+// same plain-canvas-path convention as every other icon function in this
+// file (drawSettlementIcon, paintRosetteTexture, drawCornerMedallion): no
+// image assets, lineWidth 0.8-1.5, alpha 0.6-0.9 for texture softness.
+function drawWildZoneIcon(ctx, x, y, key, ink) {
+  ctx.save();
+  ctx.strokeStyle = ink;
+  ctx.fillStyle = ink;
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.75;
+  const s = 6;
+  switch (key) {
+    case 'ashTree': // a bare, leafless tree -- forest's silhouette with the canopy stripped out
+      ctx.beginPath();
+      ctx.moveTo(x, y + s); ctx.lineTo(x, y - s * 0.3);
+      ctx.moveTo(x, y - s * 0.1); ctx.lineTo(x - s * 0.6, y - s);
+      ctx.moveTo(x, y - s * 0.3); ctx.lineTo(x + s * 0.55, y - s * 0.9);
+      ctx.moveTo(x, y - s * 0.5); ctx.lineTo(x - s * 0.4, y - s * 0.95);
+      ctx.stroke();
+      break;
+    case 'petrifiedSpire': // a jagged stone spike, hills' rosette gone rigid
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.4, y + s * 0.5);
+      ctx.lineTo(x - s * 0.15, y - s);
+      ctx.lineTo(x + s * 0.1, y - s * 0.2);
+      ctx.lineTo(x + s * 0.4, y + s * 0.5);
+      ctx.closePath();
+      ctx.stroke();
+      break;
+    case 'bramble': // a tangled thorny scribble
+      ctx.beginPath();
+      ctx.moveTo(x - s, y); ctx.lineTo(x + s, y);
+      ctx.moveTo(x - s * 0.6, y - s * 0.5); ctx.lineTo(x + s * 0.6, y + s * 0.5);
+      ctx.moveTo(x - s * 0.6, y + s * 0.5); ctx.lineTo(x + s * 0.6, y - s * 0.5);
+      ctx.stroke();
+      break;
+    case 'mushroomCap': // a mushroom silhouette, cap + stem
+      ctx.beginPath();
+      ctx.arc(x, y - s * 0.1, s * 0.55, Math.PI, 0);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.18, y - s * 0.1); ctx.lineTo(x - s * 0.14, y + s * 0.5);
+      ctx.lineTo(x + s * 0.14, y + s * 0.5); ctx.lineTo(x + s * 0.18, y - s * 0.1);
+      ctx.stroke();
+      break;
+    case 'boneStake': // crossed bones
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.6, y - s * 0.5); ctx.lineTo(x + s * 0.6, y + s * 0.5);
+      ctx.moveTo(x - s * 0.6, y + s * 0.5); ctx.lineTo(x + s * 0.6, y - s * 0.5);
+      ctx.stroke();
+      ctx.globalAlpha = 0.9;
+      [[-0.6, -0.5], [0.6, 0.5], [-0.6, 0.5], [0.6, -0.5]].forEach(([dx, dy]) => {
+        ctx.beginPath();
+        ctx.arc(x + dx * s, y + dy * s, s * 0.14, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      break;
+    case 'wisp': // a will-o-wisp: a glowing dot with faint radiating rays
+      ctx.beginPath();
+      ctx.arc(x, y, s * 0.22, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 0.4;
+      for (let k = 0; k < 6; k++) {
+        const angle = (Math.PI / 3) * k;
+        ctx.beginPath();
+        ctx.moveTo(x + Math.cos(angle) * s * 0.35, y + Math.sin(angle) * s * 0.35);
+        ctx.lineTo(x + Math.cos(angle) * s * 0.9, y + Math.sin(angle) * s * 0.9);
+        ctx.stroke();
+      }
+      break;
+    case 'redRock': // a jagged, angular boulder
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.6, y + s * 0.4);
+      ctx.lineTo(x - s * 0.3, y - s * 0.5);
+      ctx.lineTo(x + s * 0.15, y - s * 0.15);
+      ctx.lineTo(x + s * 0.6, y + s * 0.4);
+      ctx.closePath();
+      ctx.stroke();
+      break;
+    case 'saltCrust': // hatched cracked-crust marks
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.6, y - s * 0.3); ctx.lineTo(x + s * 0.2, y + s * 0.5);
+      ctx.moveTo(x - s * 0.1, y - s * 0.6); ctx.lineTo(x + s * 0.6, y + s * 0.1);
+      ctx.stroke();
+      break;
+    case 'corruptionTendril': // a spiky, reaching crack
+      ctx.beginPath();
+      ctx.moveTo(x, y + s); ctx.lineTo(x - s * 0.2, y);
+      ctx.lineTo(x + s * 0.3, y - s * 0.3); ctx.lineTo(x - s * 0.1, y - s);
+      ctx.stroke();
+      break;
+    case 'volcanicVent': // a triangle vent with ember dots
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.5, y + s * 0.5); ctx.lineTo(x, y - s * 0.6); ctx.lineTo(x + s * 0.5, y + s * 0.5);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath(); ctx.arc(x - s * 0.1, y - s * 0.9, s * 0.1, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + s * 0.2, y - s * 1.15, s * 0.08, 0, Math.PI * 2); ctx.fill();
+      break;
+    case 'crystalShard': // a faceted diamond cluster
+      ctx.beginPath();
+      ctx.moveTo(x, y - s); ctx.lineTo(x + s * 0.4, y); ctx.lineTo(x, y + s * 0.7); ctx.lineTo(x - s * 0.4, y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x + s * 0.4, y - s * 0.3); ctx.lineTo(x + s * 0.75, y + s * 0.1); ctx.lineTo(x + s * 0.4, y + s * 0.45);
+      ctx.stroke();
+      break;
+    case 'stormBolt': // a lightning zigzag
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.2, y - s); ctx.lineTo(x + s * 0.2, y - s * 0.15);
+      ctx.lineTo(x - s * 0.1, y - s * 0.15); ctx.lineTo(x + s * 0.2, y + s);
+      ctx.stroke();
+      break;
+    case 'obsidianShard': // a dark angular shard
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.35, y + s * 0.6); ctx.lineTo(x - s * 0.1, y - s * 0.7); ctx.lineTo(x + s * 0.4, y + s * 0.2);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'cloudWisp': // a small cloud swirl, drawn above a peak
+      ctx.beginPath();
+      ctx.arc(x - s * 0.3, y, s * 0.28, 0, Math.PI * 2);
+      ctx.arc(x + s * 0.1, y - s * 0.12, s * 0.34, 0, Math.PI * 2);
+      ctx.arc(x + s * 0.5, y, s * 0.24, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    case 'leyLineNexus': // a rune circle with a crossing line
+      ctx.beginPath();
+      ctx.arc(x, y, s * 0.6, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.6, y - s * 0.4); ctx.lineTo(x + s * 0.6, y + s * 0.4);
+      ctx.stroke();
+      break;
+    case 'astralScar': // a tear/rift: two arcs pulled apart
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.5, y - s * 0.7);
+      ctx.quadraticCurveTo(x - s * 0.15, y, x - s * 0.5, y + s * 0.7);
+      ctx.moveTo(x + s * 0.5, y - s * 0.7);
+      ctx.quadraticCurveTo(x + s * 0.15, y, x + s * 0.5, y + s * 0.7);
+      ctx.stroke();
+      break;
+    case 'giantsGarden': // an oversized leaf over a broken column stub
+      ctx.beginPath();
+      ctx.moveTo(x, y + s * 0.6); ctx.lineTo(x, y - s * 0.1);
+      ctx.lineTo(x - s * 0.35, y - s * 0.1); ctx.lineTo(x, y - s * 0.9); ctx.lineTo(x + s * 0.35, y - s * 0.1);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'sunkenRuins': // ruin blocks half-submerged, wavy waterline
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.5, y); ctx.lineTo(x - s * 0.5, y - s * 0.7); ctx.lineTo(x - s * 0.1, y - s * 0.7); ctx.lineTo(x - s * 0.1, y);
+      ctx.moveTo(x + s * 0.1, y); ctx.lineTo(x + s * 0.1, y - s * 0.45); ctx.lineTo(x + s * 0.5, y - s * 0.45); ctx.lineTo(x + s * 0.5, y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.7, y); ctx.quadraticCurveTo(x - s * 0.35, y + s * 0.2, x, y);
+      ctx.quadraticCurveTo(x + s * 0.35, y + s * 0.2, x + s * 0.7, y);
+      ctx.stroke();
+      break;
+    case 'scryingPool': // a rippling eye over water -- a lidded almond with a ring iris
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.7, y); ctx.quadraticCurveTo(x, y - s * 0.55, x + s * 0.7, y);
+      ctx.quadraticCurveTo(x, y + s * 0.55, x - s * 0.7, y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, s * 0.22, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
 // Relative cost of routing a road through each biome -- plains/beach are
 // cheap, forest and hills cost more, mountains and snow cost the most.
 // Water isn't listed because computeRoadPath excludes water cells from the
 // routable graph entirely (roads in this world don't cross open water).
-const OW_TERRAIN_ROAD_COST = { beach: 1.2, plains: 1, forest: 1.3, hills: 2, mountains: 4, snow: 2.5 };
+const OW_TERRAIN_ROAD_COST = { beach: 1.2, plains: 1, forest: 1.3, hills: 2, mountains: 4, snow: 2.5, barrens: 1.5 };
 
 // Binary min-heap keyed by `.dist`, used only by computeRoadPath below.
 function MinHeap() { this.a = []; }
@@ -267,6 +468,7 @@ function hexLightness(hex) {
 function labelColorFor(biome, palette) {
   const tone = biome === 'forest' ? palette.wash.forest
     : (biome === 'hills' || biome === 'mountains') ? palette.wash.hills
+    : biome === 'barrens' ? palette.wash.barrens
     : null;
   if (!tone) return palette.label;
   const themeIsDark = hexLightness(palette.label) > 50;
@@ -297,6 +499,7 @@ function drawMapLegend(ctx, canvas, palette) {
     { type: 'swatch', color: palette.biomes.hills, label: 'Hills' },
     { type: 'swatch', color: palette.biomes.mountains, label: 'Mountains' },
     { type: 'swatch', color: palette.biomes.snow, label: 'Snow' },
+    { type: 'swatch', color: palette.biomes.barrens, label: 'Barrens' },
     { type: 'icon', tier: 'village', label: 'Village' },
     { type: 'icon', tier: 'town', label: 'Town' },
     { type: 'icon', tier: 'city', label: 'City' },
@@ -562,6 +765,10 @@ function renderOverworldMap(container) {
       <div class="map-controls">
         <label>Seed <input id="ow-seed" type="number" value="${Math.floor(Math.random() * 1e6)}"></label>
         <label>Theme <select id="ow-theme"></select></label>
+        <label>Map scale <select id="ow-scale">
+          <option value="standard" selected>Standard</option>
+          <option value="continent">Continent</option>
+        </select></label>
         <label>Cells <input id="ow-cells" type="number" value="40000" min="10000" max="70000" step="5000"></label>
         <label>Octaves <input id="ow-oct" type="number" value="4" min="1" max="6"></label>
         <label>Sea level <input id="ow-sea" type="range" min="0" max="100" value="42"></label>
@@ -569,6 +776,7 @@ function renderOverworldMap(container) {
         <label>Ruggedness <input id="ow-rugged-bias" type="range" min="-20" max="20" value="0"></label>
         <label><input id="ow-island" type="checkbox" checked> Island mode</label>
         <label><input id="ow-rivers" type="checkbox" checked> Rivers</label>
+        <label><input id="ow-wildzones" type="checkbox" checked> Wild zones</label>
         <label><input id="ow-legend" type="checkbox"> Show legend</label>
         <label>Settlements <input id="ow-settle" type="number" value="6" min="0" max="20"></label>
         <button id="ow-regen">Regenerate</button>
@@ -618,64 +826,400 @@ function renderOverworldMap(container) {
   // ticks take as long as a full regenerate -- caught by actually timing a
   // live-drag tick against this real render, not assumed fast because the
   // algorithmic complexity fix was in place.
+  // Continent-scale generation is gated entirely behind cellCount exceeding
+  // today's Standard-tier ceiling -- at or below it, every branch below
+  // takes the exact `rangeCount === 1` / `canvas.width===800` path this
+  // generator already ships, byte-for-byte. This makes "does Standard still
+  // render pixel-identical to before" a mechanical fact, not an assumption.
+  const CONTINENT_CELL_THRESHOLD = 70000;
+
   let worldCache = null;
-  function buildWorld(seed, cellCount, octaves, island, seaLevel, riversOn, settleCount) {
-    const key = [seed, cellCount, octaves, island, seaLevel, riversOn, settleCount].join('|');
+  function buildWorld(seed, cellCount, octaves, island, seaLevel, riversOn, settleCount, wildZonesOn) {
+    // canvas.width/height join the key the moment canvas size can vary
+    // (the Continent preset uses a bigger canvas) -- without this, switching
+    // scale tiers could silently reuse a mesh/heightmap sized for the wrong
+    // canvas. wildZonesOn joins it for the same reason the other checkboxes
+    // already do: toggling it must never silently reuse a world built (or
+    // not built) with the wild-zone tables applied the other way.
+    const key = [seed, cellCount, octaves, island, seaLevel, riversOn, settleCount, wildZonesOn, canvas.width, canvas.height].join('|');
     if (worldCache && worldCache.key === key) return worldCache;
 
     const meshRng = mulberry32(seed + 77777);
     const mesh = buildTerrainGrid(meshRng, canvas.width, canvas.height, cellCount);
     const { cols, rows, cellW, cellH } = mesh;
 
-    // Height = isotropic base terrain (rolling variation, unchanged) +
-    // a RIDGED mountain layer, sampled through a rotated/stretched
-    // coordinate frame so it reads as one range with a real long axis
-    // instead of isotropic noise thresholded into round, disconnected
-    // blobs -- confirmed as the actual complaint (not a guess) via
-    // AskUserQuestion after the account owner rejected the first grid+
-    // erosion pass outright: "landmass is a blob", "mountains are round
-    // dots, not ranges", "rivers are too sparse/short". Island-mode falloff
-    // is no longer a plain circle: the cutoff radius itself varies by
-    // angle (a handful of random sine harmonics, much lower frequency than
-    // either noise layer), so the coastline's GROSS shape has real
-    // large-scale bays/headlands instead of erosion just adding fine
-    // wiggle to a mathematically perfect circle. Both new noise layers
-    // live in lib/noise.js; validated in a standalone prototype across 8
-    // seeds (elongated/irregular landmasses, ridge-following highland
-    // wash, 9-23 rivers per map vs. the single-digit count before) before
-    // being wired in here.
+    // Height = isotropic base terrain (rolling variation, unchanged) + a
+    // RIDGED mountain layer -- confirmed as the actual complaint (not a
+    // guess) via AskUserQuestion after the account owner rejected the first
+    // grid+erosion pass outright: "landmass is a blob", "mountains are
+    // round dots, not ranges", "rivers are too sparse/short". At Standard
+    // scale that's ONE range, sampled through a rotated/stretched
+    // coordinate frame so it reads as a real long axis instead of isotropic
+    // blobbiness. At Continent scale, a single stretched range would just
+    // be a bigger single-mountain island, not a continent -- so above
+    // CONTINENT_CELL_THRESHOLD this becomes `rangeCount` independent,
+    // separated ranges (lib/noise.js's makeMountainRange), each with its
+    // own rng stream, placed via rejection sampling with a PER-PAIR
+    // required separation derived from the two ranges' own sizes (a
+    // standalone prototype confirmed a simpler count-only separation
+    // formula lets ranges as long as 0.4x the map radius fuse together at
+    // rangeCount 5-8; sizing the gap off actual range extents instead
+    // fixed it at every tested count). Island-mode falloff uses a wobbly
+    // (non-circular) radius regardless of tier, so the coastline's GROSS
+    // shape has real large-scale bays/headlands instead of erosion just
+    // adding fine wiggle to a mathematically perfect circle.
     const heightRng = mulberry32(seed);
     const heightSample = makeFbmSampler(heightRng, octaves);
-    const ridgeRng = mulberry32(seed + 70707);
-    const ridgeAngle = ridgeRng() * Math.PI;
-    const baseRidged = makeRidgedFbmSampler(ridgeRng, Math.min(5, octaves + 1));
-    const ridgedSample = makeAnisotropicSampler(baseRidged, ridgeAngle, 1.0, 2.8);
-    const islandRng = mulberry32(seed + 80808);
-    const radiusWobble = makeRadialWobbleSampler(islandRng, 6);
-    const heights = new Float64Array(mesh.cells.length);
     const cx = canvas.width / 2, cy = canvas.height / 2, maxD = Math.hypot(cx, cy);
+
+    const rangeCount = cellCount > CONTINENT_CELL_THRESHOLD
+      ? Math.max(3, Math.min(8, Math.round(cellCount / 35000)))
+      : 1;
+    // Blend weights differ by branch, not just the ridge source: the
+    // Standard-tier ridgedSample has no envelope at all (makeAnisotropicSampler
+    // warps the WHOLE canvas), so it contributes a nonzero baseline height
+    // everywhere, not just near "the range." makeMountainRange's envelope is
+    // exactly 0 outside its ellipse by design (that's what keeps multiple
+    // ranges from smearing together) -- but that means most of a continent's
+    // area (outside the few range footprints) gets NO ridge contribution at
+    // all, so it needs a bigger base-terrain weight to still produce ordinary
+    // land there. Verified directly, not assumed: at the unchanged Standard
+    // weights (0.5 base / 0.75 ridge), a continent-scale test seed produced
+    // 0% pre-erosion land; 0.95/0.5 matched that seed's Standard-tier land
+    // fraction (~12-13%) closely.
+    // Island/coastline shape params are decided FIRST now (before ranges),
+    // because at Continent scale both the coastline AND the mountain
+    // placement need to share the same geological "grain." An earlier
+    // version of this concentrated every range into a belt hugging one
+    // coastal margin, reasoning from real-world convergent-plate tectonics
+    // (Andes/Rockies/Himalaya) after the account owner rejected a centered
+    // blob of ranges -- but directly comparing against real fantasy
+    // continent maps (Faerun, Middle-earth, Westeros -- actually looked at
+    // the images, not recalled from memory) showed that isn't the pattern
+    // fantasy cartography actually uses: all three have SEVERAL separate,
+    // independently-placed mountain clusters, often functioning as interior
+    // dividers between regions (Middle-earth's Misty/White/Mordor ranges
+    // bound Gondor, Rohan, Eriador, Mordor from each other) rather than one
+    // coastal belt. What those three maps all clearly have that this
+    // generator was still missing is coastline complexity: none of them are
+    // remotely close to a wobbled ellipse -- Faerun has a sea cutting deep
+    // into the interior, Westeros has deep bays on both sides plus Dorne
+    // hanging off as its own lobe on a narrow isthmus. So ranges go back to
+    // independent placement (keeping the per-pair size-based separation fix,
+    // which genuinely worked), and the coastline itself becomes a UNION of
+    // several elongated "lobes" (lib/noise.js's makeLobeFalloff, the same
+    // smooth-elliptical-falloff math as makeMountainRange's envelope, just
+    // without the noise) placed along a shared long axis with a bay-carving
+    // pass on top -- lobes that fully overlap read as one connected body;
+    // lobes that only just touch read as a peninsula on a narrow neck.
+    // Standard-tier (rangeCount === 1) is untouched, still the original
+    // plain-circle formula.
+    const islandRng = mulberry32(seed + 80808);
+    const continentAngle = rangeCount > 1 ? islandRng() * Math.PI : 0;
+    const cosA = Math.cos(continentAngle), sinA = Math.sin(continentAngle);
+    let lobeFalloffFns = null;
+    if (rangeCount > 1) {
+      const lobeCount = 3 + Math.floor(islandRng() * 2); // 3-4
+      lobeFalloffFns = [];
+      for (let i = 0; i < lobeCount; i++) {
+        const alongFrac = (i + 0.5) / lobeCount - 0.5; // evenly spaced along the spine, -0.5..0.5
+        // Sent an early version of this without actually looking at the
+        // rendered output first -- it was badly broken, most seeds
+        // producing almost no land at all. Root cause, found by directly
+        // measuring average lobe coverage across the canvas (0.18, i.e.
+        // most of the frame was outside every lobe): lobe size vs. spacing
+        // was tuned by eye, not measured, and radii this small relative to
+        // how far apart the lobes spread left huge gaps between them.
+        // These sizes/spread are chosen from an actual land-fraction sweep
+        // across 6 seeds (targeting a similar land coverage to the single-
+        // lobe Continent tier that already read correctly).
+        const along = alongFrac * maxD * 0.95 + (islandRng() - 0.5) * maxD * 0.15;
+        const across = (islandRng() - 0.5) * maxD * 0.12;
+        const px = cx + along * cosA - across * sinA, py = cy + along * sinA + across * cosA;
+        const lengthRadius = maxD * (0.65 + islandRng() * 0.30);
+        const widthRadius = maxD * (0.48 + islandRng() * 0.22);
+        const lobeAngle = continentAngle + (islandRng() - 0.5) * 0.35;
+        lobeFalloffFns.push(makeLobeFalloff(px, py, lobeAngle, lengthRadius, widthRadius));
+      }
+    }
+    const radiusWobble = makeRadialWobbleSampler(islandRng, 6);
+    const islandBaseRadius = 0.72;
+    const islandWobbleAmp = 0.32;
+    // Hard margin taper for the lobe-union coastline only: an elongated lobe
+    // (lengthRadius up to 0.95*maxD) can genuinely reach the canvas edge in
+    // several disconnected places, which the Standard-tier wobbled circle
+    // (tuned to stay just inside effectiveMaxDist<=~1.04*maxD, never
+    // touching the frame) never does. Found by direct measurement, not
+    // assumption: extractFillableRegions's landLoop for a broken continent
+    // render had 5 separate points pinned exactly to the canvas boundary,
+    // and closeContourChains's border-stitching (built for a landmass that
+    // spans the WHOLE frame edge-to-edge, island mode off) connected them
+    // into one degenerate loop whose shoelace area was 88% of the canvas
+    // but whose evenodd-filled pixels were under 2% -- i.e. almost nothing
+    // actually painted, exactly matching the "empty ocean" bug report.
+    // Fading land to 0 within a fixed margin of every edge guarantees no
+    // lobe ever reaches the border, so this code path is never exercised;
+    // confirmed by re-running the same loop-extraction against the same
+    // seed with this taper applied: edge touches dropped to 0 and the
+    // painted land area matched the raw land fraction again.
+    const edgeMarginX = canvas.width * 0.035, edgeMarginY = canvas.height * 0.035;
+    function edgeFalloff(x, y) {
+      const fx = Math.min(x, canvas.width - x) / edgeMarginX;
+      const fy = Math.min(y, canvas.height - y) / edgeMarginY;
+      return smoothstep(Math.max(0, Math.min(1, Math.min(fx, fy))));
+    }
+
+    // landFloor stays 0 on the Standard-tier (rangeCount === 1) path, so the
+    // shared height formula below reduces to the exact original expression
+    // there -- this only changes anything for the multi-range branch.
+    let ridgeContribution, baseWeight, ridgeWeight, landFloor = 0;
+    // Populated only in the multi-range branch below -- `ranges` keeps each
+    // range's own envelope function addressable by index (the shared
+    // ridgeContribution above only ever needed their max), and
+    // `rangeZoneOf[r]` is which RANGE_ZONE_TYPES entry (or null) that range
+    // rolled, for the wild-zone overlay pass in generate().
+    let ranges = null, rangeZoneOf = null;
+    if (rangeCount === 1) {
+      const ridgeRng = mulberry32(seed + 70707);
+      const ridgeAngle = ridgeRng() * Math.PI;
+      const baseRidged = makeRidgedFbmSampler(ridgeRng, Math.min(5, octaves + 1));
+      const ridgedSample = makeAnisotropicSampler(baseRidged, ridgeAngle, 1.0, 2.8);
+      ridgeContribution = (x, y) => ridgedSample(x / canvas.width, y / canvas.height);
+      baseWeight = 0.5; ridgeWeight = 0.75;
+    } else {
+      // Range centers are independent again (uniform-by-area disc sample,
+      // not tied to any one coastal margin) -- keeping the per-pair
+      // required-separation fix (sized off the two ranges' own extents,
+      // 1.4x their combined length radii), which a standalone prototype
+      // already confirmed prevents ranges from fusing at higher counts.
+      const rangeSpawnRng = mulberry32(seed + 40404);
+      const specs = [];
+      for (let r = 0; r < rangeCount; r++) {
+        const rangeSeed = Math.floor(rangeSpawnRng() * 0xFFFFFFFF);
+        const rangeRng = mulberry32(rangeSeed);
+        const angle = rangeRng() * Math.PI;
+        const lengthRadius = maxD * (0.18 + rangeRng() * 0.16);
+        const widthRadius = lengthRadius / (2.8 + rangeRng() * 2.0);
+        specs.push({ rangeRng, angle, lengthRadius, widthRadius });
+      }
+      const centers = [];
+      for (let r = 0; r < rangeCount; r++) {
+        let best = null, bestSlack = -Infinity;
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const ang = rangeSpawnRng() * Math.PI * 2;
+          const rad = Math.sqrt(rangeSpawnRng()) * maxD * 0.6;
+          const px = cx + Math.cos(ang) * rad, py = cy + Math.sin(ang) * rad;
+          let minSlack = centers.length ? Infinity : 1;
+          for (let j = 0; j < centers.length; j++) {
+            const required = (specs[r].lengthRadius + specs[j].lengthRadius) * 1.4;
+            minSlack = Math.min(minSlack, Math.hypot(centers[j].x - px, centers[j].y - py) - required);
+          }
+          if (minSlack > bestSlack) { bestSlack = minSlack; best = { x: px, y: py }; }
+          if (minSlack >= 0) break;
+        }
+        centers.push(best);
+      }
+      ranges = centers.map((c, i) => {
+        const ridged = makeRidgedFbmSampler(specs[i].rangeRng, Math.min(5, octaves + 1));
+        return makeMountainRange(ridged, c.x, c.y, specs[i].angle, specs[i].lengthRadius, specs[i].widthRadius);
+      });
+      ridgeContribution = (x, y) => {
+        let m = 0;
+        for (const s of ranges) m = Math.max(m, s(x, y));
+        return m;
+      };
+      // Range-zone wild zones (Blighted Wasteland, Volcanic Ashlands,
+      // Crystal Wastes, Elemental Scar, Obsidian Flats, Cloudpiercer Peaks)
+      // -- Continent tier only, an explicit scope boundary rather than a
+      // degraded Standard-tier fallback. One roll per range from its own
+      // rng stream (derived from rangeSpawnRng so it stays isolated from
+      // every other continent-tier stream), independent of whether the
+      // account owner has wild zones on at all -- gated at consumption
+      // time in generate() instead, so a toggle flip never needs a
+      // different world cached.
+      const rangeZoneRng = mulberry32(seed + 46213);
+      rangeZoneOf = centers.map(() => {
+        if (rangeZoneRng() > 0.22) return null;
+        return RANGE_ZONE_TYPES[Math.floor(rangeZoneRng() * RANGE_ZONE_TYPES.length)];
+      });
+      // Previously baseWeight=0.95 alone had to guarantee land clears sea
+      // level everywhere a lobe covers, not just near a range -- but that
+      // same 0.95 weight on isotropic base-terrain noise (which routinely
+      // swings well above its own average) ALSO pushed large low-frequency
+      // patches of ordinary interior terrain, far from any real range, past
+      // hillsT on its own. Confirmed directly: rendering and looking at the
+      // output, several seeds (1001, 271828) showed one giant continuous
+      // "highland" wash across most of the landmass instead of a few
+      // distinct ranges -- because extractFillableRegions's hillsT contour
+      // doesn't distinguish "real range" from "noise happened to be high
+      // here," a contiguous elevated patch of base terrain merges visually
+      // with the actual range footprints into one blob under the single
+      // combined highland wash (the "one continuous highland tone" this
+      // generator already uses on purpose, matching real reference maps).
+      // Splitting the old single baseWeight into a flat landFloor (does the
+      // "guarantee land clears sea level" job alone) plus a much smaller
+      // noise amplitude (baseWeight here, now just adding modest variation
+      // on top of that floor, rarely enough on its own to cross hillsT)
+      // fixes this without touching land coverage: verified via a land/
+      // biome-fraction sweep across seeds 1001/271828/42/8008 that this
+      // combination keeps land fraction in the same ~11-16% range as
+      // before while dropping "hills+ far from any range" to ~0 on every
+      // seed tested (was up to 13% before, enough to bridge separate range
+      // footprints into one blob for an unlucky noise draw).
+      landFloor = 0.40; baseWeight = 0.20; ridgeWeight = 0.55;
+    }
+
+    // Which single range (if any) dominates each cell -- kept separate from
+    // the shared ridgeContribution max above, which only needed the
+    // envelope VALUE, not WHICH range produced it. Only meaningful (and
+    // only computed) in the multi-range branch; a small nonzero floor keeps
+    // cells far from every range (ridge value near 0, i.e. genuinely not
+    // part of any range) correctly unassigned rather than nominally
+    // "belonging" to whichever range happened to be weakly largest there.
+    const rangeIndexOf = ranges ? new Int32Array(mesh.cells.length).fill(-1) : null;
+    const heights = new Float64Array(mesh.cells.length);
     mesh.cells.forEach((cell, i) => {
       const u = cell.x / canvas.width, v = cell.y / canvas.height;
-      let h = heightSample(u, v) * 0.5 + ridgedSample(u, v) * 0.75;
+      let h = landFloor + heightSample(u, v) * baseWeight + ridgeContribution(cell.x, cell.y) * ridgeWeight;
+      if (ranges) {
+        let bestVal = 0.05, bestIdx = -1;
+        for (let r = 0; r < ranges.length; r++) {
+          const val = ranges[r](cell.x, cell.y);
+          if (val > bestVal) { bestVal = val; bestIdx = r; }
+        }
+        rangeIndexOf[i] = bestIdx;
+      }
       if (island) {
         const dx = cell.x - cx, dy = cell.y - cy;
         const theta = Math.atan2(dy, dx);
-        const dist = Math.hypot(dx, dy) / maxD;
-        const effectiveMaxDist = 0.72 + radiusWobble(theta) * 0.32;
-        const t = dist / effectiveMaxDist;
-        h *= Math.max(0, 1 - t * t * 1.3);
+        if (lobeFalloffFns) {
+          let lobeMax = 0;
+          for (const fn of lobeFalloffFns) lobeMax = Math.max(lobeMax, fn(cell.x, cell.y));
+          // Only the INWARD half of the wobble carves bays/fjords into the
+          // lobe union -- it never extends land beyond what the lobes
+          // themselves already define, so this can only cut the coastline,
+          // never inflate it into something the lobe placement didn't
+          // intend.
+          const bayCarve = Math.max(0, -radiusWobble(theta)) * 0.4;
+          h *= Math.max(0, lobeMax - bayCarve) * edgeFalloff(cell.x, cell.y);
+        } else {
+          const dist = Math.hypot(dx, dy) / maxD;
+          const effectiveMaxDist = islandBaseRadius + radiusWobble(theta) * islandWobbleAmp;
+          const t = dist / effectiveMaxDist;
+          h *= Math.max(0, 1 - t * t * 1.3);
+        }
       }
       heights[i] = h;
     });
+
+    // Guarantee ONE connected landmass (the resolved design decision -- an
+    // archipelago was explicitly rejected in favor of "one bounded
+    // landmass") instead of hoping the lobe union happens to connect.
+    // Lobes overlap generously by construction (lengthRadius up to
+    // 0.95*maxD, far bigger than the ~0.3*maxD spacing between adjacent
+    // centers), but confirmed directly by rendering and looking at the
+    // actual output: seeds 42 and 8008 both produced two separate islands
+    // (the gap between lobes has a nonzero but sub-sea-level union value),
+    // linked only by a road drawn straight across open water -- while seed
+    // 1001 happened to connect fine. Re-tuning lobe geometry by trial and
+    // error against a handful of seeds is exactly how the earlier near-
+    // empty-ocean regression got introduced, so instead this detects actual
+    // disconnection via flood fill and carves a land bridge to the nearest
+    // point of the main landmass -- correct for every seed by construction,
+    // not just the ones spot-checked.
+    if (island && lobeFalloffFns) {
+      const labels = new Int32Array(heights.length).fill(-1);
+      const components = [];
+      for (let start = 0; start < heights.length; start++) {
+        if (labels[start] !== -1 || heights[start] < seaLevel) continue;
+        const compIdx = components.length;
+        const cellsIn = [];
+        const queue = [start];
+        labels[start] = compIdx;
+        while (queue.length) {
+          const idx = queue.pop();
+          cellsIn.push(idx);
+          const r = Math.floor(idx / cols), c = idx % cols;
+          if (r > 0 && labels[idx - cols] === -1 && heights[idx - cols] >= seaLevel) { labels[idx - cols] = compIdx; queue.push(idx - cols); }
+          if (r < rows - 1 && labels[idx + cols] === -1 && heights[idx + cols] >= seaLevel) { labels[idx + cols] = compIdx; queue.push(idx + cols); }
+          if (c > 0 && labels[idx - 1] === -1 && heights[idx - 1] >= seaLevel) { labels[idx - 1] = compIdx; queue.push(idx - 1); }
+          if (c < cols - 1 && labels[idx + 1] === -1 && heights[idx + 1] >= seaLevel) { labels[idx + 1] = compIdx; queue.push(idx + 1); }
+        }
+        components.push(cellsIn);
+      }
+      if (components.length > 1) {
+        components.sort((a, b) => b.length - a.length);
+        // Bounded sample of each component for nearest-pair search -- an
+        // exhaustive O(main * other) pass over every land cell would be far
+        // too slow at continent cell counts, and a bridge only needs a
+        // reasonably close pair of points, not the mathematically closest.
+        function sampleCells(cellsIn, n) {
+          if (cellsIn.length <= n) return cellsIn;
+          const out = [];
+          const step = cellsIn.length / n;
+          for (let i = 0; i < n; i++) out.push(cellsIn[Math.floor(i * step)]);
+          return out;
+        }
+        const mainSample = sampleCells(components[0], 400);
+        const bridgeWidth = Math.max(cellW, cellH) * 6;
+        for (let k = 1; k < components.length; k++) {
+          const compSample = sampleCells(components[k], 200);
+          let bestDist = Infinity, bestA = null, bestB = null;
+          for (const a of mainSample) {
+            const ar = Math.floor(a / cols), ac = a % cols;
+            const ax = (ac + 0.5) * cellW, ay = (ar + 0.5) * cellH;
+            for (const b of compSample) {
+              const br = Math.floor(b / cols), bc = b % cols;
+              const bx = (bc + 0.5) * cellW, by = (br + 0.5) * cellH;
+              const d = (ax - bx) * (ax - bx) + (ay - by) * (ay - by);
+              if (d < bestDist) { bestDist = d; bestA = { x: ax, y: ay }; bestB = { x: bx, y: by }; }
+            }
+          }
+          const dxB = bestB.x - bestA.x, dyB = bestB.y - bestA.y;
+          const len = Math.hypot(dxB, dyB) || 1;
+          const ux = dxB / len, uy = dyB / len;
+          const minR = Math.max(0, Math.floor(Math.min(bestA.y, bestB.y) / cellH) - 8);
+          const maxR = Math.min(rows - 1, Math.ceil(Math.max(bestA.y, bestB.y) / cellH) + 8);
+          const minC = Math.max(0, Math.floor(Math.min(bestA.x, bestB.x) / cellW) - 8);
+          const maxC = Math.min(cols - 1, Math.ceil(Math.max(bestA.x, bestB.x) / cellW) + 8);
+          for (let r = minR; r <= maxR; r++) {
+            for (let c = minC; c <= maxC; c++) {
+              const px = (c + 0.5) * cellW, py = (r + 0.5) * cellH;
+              const t = (px - bestA.x) * ux + (py - bestA.y) * uy;
+              if (t < 0 || t > len) continue;
+              const projX = bestA.x + ux * t, projY = bestA.y + uy * t;
+              const perpDist = Math.hypot(px - projX, py - projY);
+              if (perpDist > bridgeWidth) continue;
+              const idx = r * cols + c;
+              const target = seaLevel + 0.05 * (1 - perpDist / bridgeWidth);
+              if (heights[idx] < target) heights[idx] = target;
+            }
+          }
+        }
+      }
+    }
 
     // Erosion pipeline (lib/terrain-grid.js), matching the Step 0 prototype
     // exactly: pit-fill before erosion so hydrology below doesn't inherit
     // the raw noise field's own tiny pits, hydraulic + thermal erosion for
     // the actual organic shaping, then a second pit-fill pass since erosion
-    // itself introduces new small single-cell pits.
+    // itself introduces new small single-cell pits. Droplet count tapers
+    // above the Continent threshold: a channel's visual footprint is a few
+    // cells wide regardless of grid size, so once density is high enough
+    // for several droplets to already trace the same channel, more
+    // droplets-per-cell mostly re-carve ground already carved rather than
+    // add new distinguishable detail -- trading those diminishing-return
+    // iterations for real wall-clock savings. At cellCount <=
+    // CONTINENT_CELL_THRESHOLD this produces the exact existing default
+    // ({}), unchanged.
     const erosionRng = mulberry32(seed + 50505);
+    const erosionParams = {};
+    if (cellCount > CONTINENT_CELL_THRESHOLD) {
+      const scale = Math.sqrt(CONTINENT_CELL_THRESHOLD / cellCount);
+      erosionParams.dropletCount = Math.round(cols * rows * Math.max(0.6, 1.5 * scale));
+    }
     fillPits(heights, cols, rows, seaLevel);
-    applyHydraulicErosion(heights, cols, rows, erosionRng, {});
+    applyHydraulicErosion(heights, cols, rows, erosionRng, erosionParams);
     applyThermalErosion(heights, cols, rows, 3, 0.025, 0.5);
     fillPits(heights, cols, rows, seaLevel);
 
@@ -692,6 +1236,7 @@ function renderOverworldMap(container) {
     // flow/downhill/lake data and river threshold are pure functions of the
     // cached height field and belong here.
     let flow = null, downhill = null, isLake = null, riverThreshold = Infinity;
+    let lakeIdOf = null, largestLakeId = -1;
     const nearRiver = new Float64Array(mesh.cells.length);
     if (riversOn) {
       const hydro = computeHydrology(mesh.cells, heights, seaLevel);
@@ -704,35 +1249,110 @@ function renderOverworldMap(container) {
         nearRiver[i] = Math.max(nearRiver[i], 1);
         for (const nb of mesh.cells[i].neighbors) nearRiver[nb] = Math.max(nearRiver[nb], 0.5);
       }
+      // Scrying Pool needs to single out ONE lake (the largest) -- isLake
+      // alone is a per-cell flag with no notion of which cells belong to
+      // the same lake versus a different, unconnected one.
+      const lakeLabels = labelLakes(mesh.cells, isLake);
+      lakeIdOf = lakeLabels.lakeIdOf;
+      largestLakeId = lakeLabels.sizes[lakeLabels.largestId] >= 6 ? lakeLabels.largestId : -1;
     }
 
     // Moisture (river-adjacency bump already folded in) and refBiome are
     // both bias-independent -- forestBias/ruggedBias only affect the LIVE
     // `biome` field, computed fresh per render in generate() itself.
+    // At Continent scale (rangeCount > 1), a single coarse regional field
+    // nudges moisture so different parts of the landmass have a different
+    // character (a drier interior, a wetter coast) instead of one
+    // statistically-uniform field repeated everywhere -- blended directly
+    // into `m` rather than threaded through biomeAt as a new parameter,
+    // since biomeAt only ever compares `moist > forestT` regardless of
+    // where that moisture value came from.
     const moistureSample = makeFbmSampler(mulberry32(seed + 99991), Math.max(1, octaves - 1));
+    const regionalMoisture = rangeCount > 1 ? makeFbmSampler(mulberry32(seed + 91919), 2) : null;
     const mOf = new Float64Array(mesh.cells.length);
     const refBiomeOf = new Array(mesh.cells.length);
     mesh.cells.forEach((cell, i) => {
       let m = moistureSample(cell.x / canvas.width, cell.y / canvas.height);
+      if (regionalMoisture) {
+        const regional = regionalMoisture(cell.x / canvas.width, cell.y / canvas.height);
+        m = m * 0.75 + regional * 0.25;
+      }
       m = Math.min(1, m + nearRiver[i] * 0.3);
       mOf[i] = m;
       refBiomeOf[i] = biomeAt(heights[i], m, seaLevel, 0, 0);
     });
 
+    // Wetlowland: a derived flag, not a new base biome (Bone Marsh/Feywild
+    // Bog are wild-zone content layered on ordinary plains/beach, not
+    // baseline terrain in their own right) -- a wet low-lying cell, gated
+    // on moisture OR river-adjacency so a marsh reads as "near water"
+    // either way. refBiomeOf itself never changes for these cells, so
+    // naming/settlement/road logic downstream is completely untouched.
+    const wetlowlandHillsT = Math.max(seaLevel + 0.08, 0.55);
+    const marshMoistureT = 0.62;
+    const wetlowlandOf = new Uint8Array(mesh.cells.length);
+    for (let i = 0; i < mesh.cells.length; i++) {
+      const rb = refBiomeOf[i];
+      wetlowlandOf[i] = (rb === 'plains' || rb === 'beach') && heights[i] < wetlowlandHillsT &&
+        (mOf[i] > marshMoistureT || nearRiver[i] > 0) ? 1 : 0;
+    }
+
     // Resolve each naming region to a phoneme category by tallying its
-    // cells' refBiomes and taking the majority.
+    // cells' refBiomes and taking the majority. The same pass also tracks,
+    // per region, whether each SPECIAL_ZONE_TYPES baseBiome actually has a
+    // matching cell there at all -- consulted below so a region never gets
+    // assigned a zone type that would render as nothing (e.g. Ashen Forest
+    // rolled for a region with no forest cells).
     const regionBiomeTally = [];
-    for (let r = 0; r < regionCount; r++) regionBiomeTally.push({});
+    const regionHasBase = [];
+    for (let r = 0; r < regionCount; r++) { regionBiomeTally.push({}); regionHasBase.push({ forest: false, hills: false, barrens: false, wetlowland: false, any: false }); }
     for (let i = 0; i < mesh.cells.length; i++) {
       const tally = regionBiomeTally[regionOf[i]];
       const category = BIOME_TO_NAME_CATEGORY[refBiomeOf[i]] || 'plains';
       tally[category] = (tally[category] || 0) + 1;
+      const hasBase = regionHasBase[regionOf[i]];
+      if (heights[i] >= seaLevel) hasBase.any = true;
+      const rb = refBiomeOf[i];
+      if (rb === 'forest') hasBase.forest = true;
+      else if (rb === 'hills') hasBase.hills = true;
+      else if (rb === 'barrens') hasBase.barrens = true;
+      if (wetlowlandOf[i]) hasBase.wetlowland = true;
     }
     const regionCategory = regionBiomeTally.map((tally) => {
       let best = 'plains', bestCount = -1;
       for (const category in tally) { if (tally[category] > bestCount) { bestCount = tally[category]; best = category; } }
       return best;
     });
+
+    // Special wild zones (Ashen Forest, Petrified Wastes, Thornwood, Fungal
+    // Forest, Bone Marsh, Feywild Bog, Bloodstone Desert, Salt Flats,
+    // Frostfell) -- reuses the naming regions above directly rather than a
+    // separate region system; their contiguous boundaries make a coherent
+    // zone shape for free. One roll per region, filtered to types whose
+    // baseBiome gate actually has a matching cell in THAT region, capped
+    // at 2 zoned regions per map so a whole continent doesn't turn into a
+    // patchwork. Rolled unconditionally (like rangeZoneOf above) and gated
+    // at consumption time in generate(), so toggling #ow-wildzones never
+    // needs a different cached world.
+    const zoneRng = mulberry32(seed + 46617);
+    const regionZoneOf = new Array(regionCount).fill(null);
+    let zonedRegionCount = 0;
+    for (let r = 0; r < regionCount; r++) {
+      if (zonedRegionCount >= 2) break;
+      if (zoneRng() > 0.15) continue;
+      const eligible = SPECIAL_ZONE_TYPES.filter((z) => regionHasBase[r][z.baseBiome] || z.baseBiome === 'any');
+      if (eligible.length === 0) continue;
+      regionZoneOf[r] = eligible[Math.floor(zoneRng() * eligible.length)];
+      zonedRegionCount++;
+    }
+    // Frostfell overrides refBiome itself (a forced snow cap, not a
+    // recolor) -- applied here, once, to the cached field, so it stays
+    // structural like naming/settlements/roads rather than re-rolling on
+    // every live slider drag.
+    for (let i = 0; i < mesh.cells.length; i++) {
+      const zone = regionZoneOf[regionOf[i]];
+      if (zone && zone.forcesSnow && heights[i] >= seaLevel) refBiomeOf[i] = 'snow';
+    }
 
     // Settlements: refBiome-keyed candidate scoring/placement/tiers/names,
     // matching Phase 9's "sculpt without losing what's already settled".
@@ -760,6 +1380,46 @@ function renderOverworldMap(container) {
       s.tier = i < cityCount ? 'city' : i < cityCount + townCount ? 'town' : 'village';
       s.name = generateSettlementName(nameRng, s.tier, regionCategory[regionOf[s.index]]);
     });
+
+    // Point-feature wild-zone landmarks (Ley Line Nexus, Astral Scar,
+    // Giant's Garden, Sunken Ruins) -- porting the single-landmark pattern
+    // already shipped in map-detail.js's generate(), but scattered across
+    // naming regions (at most one per region, capped overall) instead of
+    // one center-biased pick, since an overworld-scale map has room for
+    // more than one. Rolled unconditionally, gated at consumption time in
+    // generate() like the other two wild-zone tables.
+    const landmarkRng = mulberry32(seed + 68219);
+    const shallowwaterAdjacent = new Uint8Array(mesh.cells.length);
+    for (let i = 0; i < mesh.cells.length; i++) {
+      if (refBiomeOf[i] !== 'shallowwater') continue;
+      for (const nb of mesh.cells[i].neighbors) {
+        if (heights[nb] >= seaLevel + 0.03) shallowwaterAdjacent[nb] = 1;
+      }
+    }
+    const landmarks = [];
+    const LANDMARK_CAP = 4;
+    const minLandmarkDist = Math.max(canvas.width, canvas.height) * 0.06;
+    for (let r = 0; r < regionCount && landmarks.length < LANDMARK_CAP; r++) {
+      const category = regionCategory[r];
+      const pool = (POINT_LANDMARK_TYPES[category] || []).concat(POINT_LANDMARK_TYPES.any);
+      if (pool.length === 0) continue;
+      const type = pool[Math.floor(landmarkRng() * pool.length)];
+      if (landmarkRng() > (type.rare ? 0.10 : 0.30)) continue;
+      const candidates = [];
+      for (let i = 0; i < mesh.cells.length; i++) {
+        if (regionOf[i] !== r || heights[i] < seaLevel + 0.03) continue;
+        if (type.placement === 'shallowwaterAdjacent' ? !shallowwaterAdjacent[i] : (refBiomeOf[i] === 'hills' || refBiomeOf[i] === 'mountains' || refBiomeOf[i] === 'snow')) continue;
+        candidates.push(i);
+      }
+      if (candidates.length === 0) continue;
+      const idx = candidates[Math.floor(landmarkRng() * candidates.length)];
+      const px = mesh.cells[idx].x, py = mesh.cells[idx].y;
+      const tooClose = settlements.some((s) => Math.hypot(s.x - px, s.y - py) < minLandmarkDist) ||
+        landmarks.some((l) => Math.hypot(l.x - px, l.y - py) < minLandmarkDist);
+      if (tooClose) continue;
+      const baseName = generateSettlementName(landmarkRng, 'village', category);
+      landmarks.push({ x: px, y: py, key: type.key, label: type.label, name: `${type.label} of ${baseName}` });
+    }
 
     // Roads: MST connection choice AND each connection's actual Dijkstra
     // route, both computed once here -- neither depends on anything the
@@ -798,6 +1458,8 @@ function renderOverworldMap(container) {
       key, mesh, heights, cols, rows, cellW, cellH,
       mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
       regionOf, regionCategory, settlements, roadPaths,
+      wetlowlandOf, rangeIndexOf, rangeZoneOf, regionZoneOf,
+      lakeIdOf, largestLakeId, landmarks,
     };
     return worldCache;
   }
@@ -851,6 +1513,7 @@ function renderOverworldMap(container) {
     const riversOn = container.querySelector('#ow-rivers').checked;
     const legendOn = container.querySelector('#ow-legend').checked;
     const settleCount = parseInt(container.querySelector('#ow-settle').value, 10) || 0;
+    const wildZonesOn = container.querySelector('#ow-wildzones').checked;
     const theme = MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
     const palette = theme.overworld;
 
@@ -863,6 +1526,7 @@ function renderOverworldMap(container) {
     const mountainsT = Math.max(hillsT + 0.05, 0.7 - ruggedBias);
     const snowT = Math.max(mountainsT + 0.05, 0.85 - ruggedBias);
     const forestT = Math.min(0.9, Math.max(0.1, 0.5 - forestBias));
+    const aridT = Math.max(0, Math.min(forestT - 0.15, 0.22 - forestBias * 0.5));
 
     // Dedicated rngs for every LIVE (per-render) generative concern --
     // biome texture, wash, grain, border -- fully isolated from each other
@@ -880,11 +1544,13 @@ function renderOverworldMap(container) {
     const grainRng = mulberry32(seed + 13579);
     const borderRng = mulberry32(seed + 24680);
 
-    const world = buildWorld(seed, cellCount, octaves, island, seaLevel, riversOn, settleCount);
+    const world = buildWorld(seed, cellCount, octaves, island, seaLevel, riversOn, settleCount, wildZonesOn);
     const {
       mesh, heights, cols, rows, cellW, cellH,
       mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
       regionOf, regionCategory, settlements, roadPaths,
+      wetlowlandOf, rangeIndexOf, rangeZoneOf, regionZoneOf,
+      lakeIdOf, largestLakeId, landmarks,
     } = world;
 
     // `biome` is the LIVE classification (Vegetation/Ruggedness sliders
@@ -956,7 +1622,7 @@ function renderOverworldMap(container) {
         const px = sx + (textureRng() - 0.5) * spacing * 0.6;
         const py = sy + (textureRng() - 0.5) * spacing * 0.6;
         const biome = biomeAtPoint(px, py);
-        if (biome === 'hills' || biome === 'mountains' || biome === 'forest') continue; // wash+icon pass below, gated by !fast
+        if (biome === 'hills' || biome === 'mountains' || biome === 'forest' || biome === 'barrens') continue; // wash+icon pass below, gated by !fast
         paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink);
       }
     }
@@ -989,6 +1655,25 @@ function renderOverworldMap(container) {
         ctx.restore();
       }
 
+      // Barrens wash: symmetric to the forest wash above, just on the
+      // opposite (low-moisture) side of biomeAt's aridT threshold -- passing
+      // `1 - m` and thresholding on `1 - aridT` reuses extractFillableRegions'
+      // superlevel-set extraction without needing a second sub-level-set
+      // code path. Needed because the base land fill is a single flat
+      // plains color regardless of moisture (see landLoops fill above) --
+      // without an overlay wash, barrens cells would be invisible under it,
+      // same reason forest needs this same treatment.
+      const landBarrensAt = (i) => (heights[i] >= seaLevel + 0.03 ? 1 - cellData[i].m : -1);
+      const barrensLoops = extractFillableRegions(cols, rows, cellW, cellH, landBarrensAt, 1 - aridT, canvas.width, canvas.height, minLoopArea);
+      if (barrensLoops.length > 0) {
+        ctx.save();
+        clipToLoops(landLoops.length ? landLoops : beachLoops);
+        for (const group of groupChainsIntoLoops(barrensLoops)) {
+          paintWatercolorWash(ctx, group, washRng, palette.wash.barrens, palette.ink, 28);
+        }
+        ctx.restore();
+      }
+
       // Hills+mountains+snow wash: one combined highland tone (matching
       // real reference maps, which show a single continuous highland wash
       // rather than two abutting flat colors); hills/mountains stay visually
@@ -1006,8 +1691,91 @@ function renderOverworldMap(container) {
           const biome = biomeAtPoint(px, py);
           if (biome === 'hills' || biome === 'mountains') {
             paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, biome === 'mountains');
-          } else if (biome === 'forest') {
+          } else if (biome === 'forest' || biome === 'barrens') {
             paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink);
+          }
+        }
+      }
+
+      // Wild zones: additive overlays painted AFTER the normal terrain
+      // passes above, so a map that rolled none renders byte-for-byte
+      // identical to before this system existed, and toggling
+      // #ow-wildzones off just skips this block entirely (no different
+      // cached world needed -- regionZoneOf/rangeZoneOf/landmarks are
+      // always computed in buildWorld, gated only here at paint time).
+      if (wildZonesOn) {
+        // Special zones (band-threshold reflavors) -- one region at a
+        // time, recoloring only the cells that already matched both that
+        // region AND the zone's baseBiome (or wetlowlandOf for the two
+        // wetlowland-gated types). Frostfell has no wash/icon of its own
+        // (it overrides refBiome to 'snow' back in buildWorld, so it's
+        // already painted by the ordinary snow fill below).
+        for (let r = 0; r < regionZoneOf.length; r++) {
+          const zone = regionZoneOf[r];
+          if (!zone || zone.forcesSnow) continue;
+          const zoneAt = (i) => {
+            if (regionOf[i] !== r) return 0;
+            const match = zone.baseBiome === 'wetlowland' ? wetlowlandOf[i] : (cellData[i].refBiome === zone.baseBiome ? 1 : 0);
+            return match ? 1 : 0;
+          };
+          const zoneLoops = extractFillableRegions(cols, rows, cellW, cellH, zoneAt, 0.5, canvas.width, canvas.height, minLoopArea);
+          if (zoneLoops.length === 0) continue;
+          for (const group of groupChainsIntoLoops(zoneLoops)) {
+            paintWatercolorWash(ctx, group, washRng, palette.wash[zone.washKey], palette.ink, 24);
+          }
+          for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
+            for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
+              const px = sx + (textureRng() - 0.5) * spacing * 0.6;
+              const py = sy + (textureRng() - 0.5) * spacing * 0.6;
+              const gx = Math.min(cols - 1, Math.max(0, Math.floor(px / cellW)));
+              const gy = Math.min(rows - 1, Math.max(0, Math.floor(py / cellH)));
+              if (!zoneAt(gy * cols + gx)) continue;
+              drawWildZoneIcon(ctx, px, py, zone.iconKey, palette.ink);
+            }
+          }
+        }
+
+        // Range zones (Continent tier only -- rangeIndexOf/rangeZoneOf are
+        // both null at Standard tier, so this loop simply never runs
+        // there). 'range' recolors that range's whole hillsT+ footprint;
+        // 'rangeBase' only its hillsT..mountainsT foothill band;
+        // 'snowOnly' (Cloudpiercer Peaks) changes nothing but the icon at
+        // that range's own existing snow-cap cells.
+        if (rangeZoneOf) {
+          for (let r = 0; r < rangeZoneOf.length; r++) {
+            const zone = rangeZoneOf[r];
+            if (!zone) continue;
+            if (zone.appliesTo === 'snowOnly') {
+              for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
+                for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
+                  const px = sx + (textureRng() - 0.5) * spacing * 0.6;
+                  const py = sy + (textureRng() - 0.5) * spacing * 0.6;
+                  const gx = Math.min(cols - 1, Math.max(0, Math.floor(px / cellW)));
+                  const gy = Math.min(rows - 1, Math.max(0, Math.floor(py / cellH)));
+                  const gi = gy * cols + gx;
+                  if (rangeIndexOf[gi] !== r || heights[gi] < snowT) continue;
+                  drawWildZoneIcon(ctx, px, py, zone.iconKey, palette.ink);
+                }
+              }
+              continue;
+            }
+            const highCut = zone.appliesTo === 'rangeBase' ? mountainsT : Infinity;
+            const zoneAt = (i) => (rangeIndexOf[i] === r && heights[i] >= hillsT && heights[i] < highCut) ? 1 : 0;
+            const zoneLoops = extractFillableRegions(cols, rows, cellW, cellH, zoneAt, 0.5, canvas.width, canvas.height, minLoopArea);
+            if (zoneLoops.length === 0) continue;
+            for (const group of groupChainsIntoLoops(zoneLoops)) {
+              paintWatercolorWash(ctx, group, washRng, palette.wash[zone.washKey], palette.ink, 24);
+            }
+            for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
+              for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
+                const px = sx + (textureRng() - 0.5) * spacing * 0.6;
+                const py = sy + (textureRng() - 0.5) * spacing * 0.6;
+                const gx = Math.min(cols - 1, Math.max(0, Math.floor(px / cellW)));
+                const gy = Math.min(rows - 1, Math.max(0, Math.floor(py / cellH)));
+                if (!zoneAt(gy * cols + gx)) continue;
+                drawWildZoneIcon(ctx, px, py, zone.iconKey, palette.ink);
+              }
+            }
           }
         }
       }
@@ -1099,6 +1867,20 @@ function renderOverworldMap(container) {
       const lakeVal = (i) => (isLake[i] && flow[i] >= 2 ? 1 : 0);
       const lakeLoops = extractFillableRegions(cols, rows, cellW, cellH, lakeVal, 0.5, canvas.width, canvas.height, minLoopArea);
       fillLoopsEvenOdd(lakeLoops, palette.lake);
+
+      // Scrying Pool: decorates only the SINGLE LARGEST lake (largestLakeId,
+      // labeled once in buildWorld via lib/hydrology.js's labelLakes --
+      // isLake alone can't tell separate lakes apart). -1 when no lake
+      // cleared the minimum size there, so this is a clean no-op on a
+      // lake-free (or only-puddles) seed.
+      if (wildZonesOn && largestLakeId !== -1) {
+        let sumX = 0, sumY = 0, n = 0;
+        for (let i = 0; i < mesh.cells.length; i++) {
+          if (lakeIdOf[i] !== largestLakeId) continue;
+          sumX += mesh.cells[i].x; sumY += mesh.cells[i].y; n++;
+        }
+        if (n > 0) drawWildZoneIcon(ctx, sumX / n, sumY / n, 'scryingPool', palette.ink);
+      }
     }
 
     // Settlements and roadPaths come straight from the cache (world) --
@@ -1136,6 +1918,21 @@ function renderOverworldMap(container) {
       ctx.fillText(s.name, px, py + r + 3);
     }
 
+    // Point-feature wild-zone landmarks (Ley Line Nexus, Astral Scar,
+    // Giant's Garden, Sunken Ruins) -- placed once in buildWorld,
+    // drawn here the same way settlements are: straight from the cache,
+    // no live-slider dependence.
+    if (wildZonesOn) {
+      ctx.font = `${OW_TIER_FONT.village}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      for (const lm of landmarks) {
+        drawWildZoneIcon(ctx, lm.x, lm.y, lm.key, palette.ink);
+        ctx.fillStyle = palette.label;
+        ctx.fillText(lm.name, lm.x, lm.y + 9);
+      }
+    }
+
     paintParchmentGrain(ctx, canvas, grainRng, palette.grain);
 
     if (legendOn) drawMapLegend(ctx, canvas, palette);
@@ -1147,7 +1944,7 @@ function renderOverworldMap(container) {
     // statistics (biome mix, settlement tiers, river count, island-ness),
     // not anything the map's rendering needs -- computed last, purely from
     // data already on hand.
-    const landBiomeCounts = { plains: 0, forest: 0, hills: 0, mountains: 0, snow: 0 };
+    const landBiomeCounts = { plains: 0, forest: 0, hills: 0, mountains: 0, snow: 0, barrens: 0 };
     let beachCount = 0, landCount = 0;
     for (const { biome } of cellData) {
       if (biome === 'deepwater' || biome === 'shallowwater') continue;
@@ -1202,19 +1999,76 @@ function renderOverworldMap(container) {
     });
     return best ? { settlement: best, idx: bestIdx } : null;
   }
+  // Empty-terrain click target for "zoom in" (map/detail). Reads worldCache
+  // directly rather than the generate()-local cellData/biomeAtPoint (which
+  // vanish once generate() returns) -- worldCache is the one piece of
+  // per-cell data that survives across renders in this closure, same reason
+  // the persistent settlement click handler below already relies on it via
+  // currentSettlements.
+  function hitTestLand(evt) {
+    if (!worldCache) return null;
+    const { x, y } = canvasToInternal(evt);
+    if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return null;
+    const { cols, rows, cellW, cellH, refBiomeOf } = worldCache;
+    const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
+    const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
+    const idx = gy * cols + gx;
+    const biome = refBiomeOf[idx];
+    if (biome === 'deepwater' || biome === 'shallowwater') return null;
+    return { x, y, gx, gy, idx, biome };
+  }
+  // Neighborhood average (not the single clicked cell) so a detail map's
+  // bias reflects the general character of the area rather than one noise
+  // sample -- a click right at a biome's ragged edge would otherwise anchor
+  // the detail map to an atypical single cell.
+  function sampleLocalCharacter(world, gx, gy, radius) {
+    const { cols, rows, heights, mOf } = world;
+    let hSum = 0, mSum = 0, n = 0;
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const cx = gx + dx, cy = gy + dy;
+        if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) continue;
+        const idx = cy * cols + cx;
+        hSum += heights[idx]; mSum += mOf[idx]; n++;
+      }
+    }
+    return { avgHeight: n ? hSum / n : 0.5, avgMoisture: n ? mSum / n : 0.5 };
+  }
   canvas.addEventListener('mousemove', (evt) => {
-    canvas.style.cursor = hitTestSettlement(evt) ? 'pointer' : 'default';
+    canvas.style.cursor = (hitTestSettlement(evt) || hitTestLand(evt)) ? 'pointer' : 'default';
   });
   canvas.addEventListener('click', (evt) => {
     const hit = hitTestSettlement(evt);
     const actionEl = container.querySelector('#ow-settlement-action');
     actionEl.innerHTML = '';
-    if (!hit) return;
+    if (hit) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = `Generate town map for ${hit.settlement.name} →`;
+      btn.addEventListener('click', () => {
+        const url = `#/map/settlement?seed=${currentSeed}&idx=${hit.idx}&name=${encodeURIComponent(hit.settlement.name)}&tier=${hit.settlement.tier}`;
+        location.hash = url;
+      });
+      actionEl.appendChild(btn);
+      return;
+    }
+    // Empty-terrain click: offer a zoomed-in detail map of this spot. Only
+    // 4 scalars cross the URL (biome for the button label; h/m/sea as the
+    // actual thematic anchor) -- everything else (the detail map's actual
+    // terrain shape, erosion, rivers, its landmark) is freshly generated by
+    // map-detail.js, biased toward those numbers, the same way
+    // map-settlement.js regenerates a wholly new building layout rather
+    // than reusing this map's own mesh geometry.
+    const landHit = hitTestLand(evt);
+    if (!landHit) return;
+    const { avgHeight, avgMoisture } = sampleLocalCharacter(worldCache, landHit.gx, landHit.gy, 4);
+    const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.textContent = `Generate town map for ${hit.settlement.name} →`;
+    btn.textContent = `Generate detail map here (${landHit.biome}) →`;
     btn.addEventListener('click', () => {
-      const url = `#/map/settlement?seed=${currentSeed}&idx=${hit.idx}&name=${encodeURIComponent(hit.settlement.name)}&tier=${hit.settlement.tier}`;
+      const url = `#/map/detail?seed=${currentSeed}&x=${Math.round(landHit.x)}&y=${Math.round(landHit.y)}` +
+        `&biome=${landHit.biome}&h=${avgHeight.toFixed(3)}&m=${avgMoisture.toFixed(3)}&sea=${seaLevel}`;
       location.hash = url;
     });
     actionEl.appendChild(btn);
@@ -1268,9 +2122,35 @@ function renderOverworldMap(container) {
     generate(false);
   }
 
+  // Map scale presets: bundle canvas size + cell-count range + settlement
+  // max into one choice rather than requiring the raw sliders to be
+  // hand-tuned into a sane combination -- still adjustable afterward via
+  // those same sliders, just with a sensible starting point one click away.
+  // "Standard" is today's exact numbers (unchanged); "Continent" is gated
+  // behind buildWorld's own CONTINENT_CELL_THRESHOLD, so choosing it is
+  // what actually reaches the multi-range/regional-moisture/erosion-taper
+  // code above -- below that cell count none of it is reachable.
+  const OW_SCALE_PRESETS = {
+    standard: { width: 800, height: 600, cellsMin: 10000, cellsMax: 70000, cellsValue: 40000, settleMax: 20, settleValue: 6 },
+    continent: { width: 1600, height: 1200, cellsMin: 80000, cellsMax: 250000, cellsValue: 150000, settleMax: 35, settleValue: 20 },
+  };
+  function applyScalePreset(name) {
+    const p = OW_SCALE_PRESETS[name] || OW_SCALE_PRESETS.standard;
+    canvas.width = p.width;
+    canvas.height = p.height;
+    const cellsEl = container.querySelector('#ow-cells');
+    cellsEl.min = p.cellsMin; cellsEl.max = p.cellsMax; cellsEl.value = p.cellsValue;
+    const settleEl = container.querySelector('#ow-settle');
+    settleEl.max = p.settleMax; settleEl.value = p.settleValue;
+  }
+
   generate(false);
   container.querySelector('#ow-regen').addEventListener('click', () => generate(false));
   container.querySelector('#ow-theme').addEventListener('change', () => generate(false));
+  container.querySelector('#ow-scale').addEventListener('change', (evt) => {
+    applyScalePreset(evt.target.value);
+    generate(false);
+  });
   container.querySelector('#ow-forest-bias').addEventListener('input', scheduleLiveRegen);
   container.querySelector('#ow-forest-bias').addEventListener('change', finishLiveRegen);
   container.querySelector('#ow-rugged-bias').addEventListener('input', scheduleLiveRegen);
