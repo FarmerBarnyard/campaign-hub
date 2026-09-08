@@ -136,6 +136,38 @@ function renderDetailMap(container, params) {
   // zone.
   const zone = findZoneByKey(params.get('zone'));
   const locationLabel = zone ? zone.label : biome;
+  // The guide grid (see map-overworld.js's sampleHeightGuide) carries the
+  // parent map's REAL local height shape across the route boundary -- the
+  // account owner correctly pointed out that h/m/sea alone (a single
+  // averaged scalar) only matched statistics, not actual geography: a
+  // click near a bay produced an unrelated patch with the right average
+  // elevation, not a zoomed-in view of that bay's real curve. Guarded so
+  // an old/hand-built link missing these params still renders via the
+  // pre-existing mean-shift fallback below.
+  const guideParam = params.get('guide');
+  const guideCols = parseInt(params.get('gw'), 10) || 0;
+  const guideRows = parseInt(params.get('gh'), 10) || 0;
+  let sampleGuide = null;
+  if (guideParam && guideCols > 0 && guideRows > 0) {
+    const byteStr = atob(decodeURIComponent(guideParam));
+    const guideBytes = new Uint8Array(byteStr.length);
+    for (let i = 0; i < byteStr.length; i++) guideBytes[i] = byteStr.charCodeAt(i);
+    // Bilinear interpolation over the guideCols x guideRows grid, treated
+    // as covering the same [0,1]x[0,1] space this canvas does -- the
+    // overworld sampled its window to correspond exactly to what this
+    // canvas shows, so no separate offset/scale bookkeeping is needed here.
+    sampleGuide = (u, v) => {
+      const fx = Math.min(guideCols - 1, Math.max(0, u * guideCols - 0.5));
+      const fy = Math.min(guideRows - 1, Math.max(0, v * guideRows - 0.5));
+      const x0 = Math.floor(fx), y0 = Math.floor(fy);
+      const x1 = Math.min(guideCols - 1, x0 + 1), y1 = Math.min(guideRows - 1, y0 + 1);
+      const tx = fx - x0, ty = fy - y0;
+      const sampleAt = (x, y) => guideBytes[y * guideCols + x] / 255;
+      const top = sampleAt(x0, y0) * (1 - tx) + sampleAt(x1, y0) * tx;
+      const bot = sampleAt(x0, y1) * (1 - tx) + sampleAt(x1, y1) * tx;
+      return top * (1 - ty) + bot * ty;
+    };
+  }
 
   container.innerHTML = `
     <h2 id="dt-heading">Detail map</h2>
@@ -229,9 +261,21 @@ function renderDetailMap(container, params) {
     let meanRaw = 0;
     for (let i = 0; i < rawH.length; i++) meanRaw += rawH[i];
     meanRaw /= rawH.length;
-    const shift = targetAvgHeight - meanRaw;
     const heights = new Float64Array(rawH.length);
-    for (let i = 0; i < rawH.length; i++) heights[i] = Math.max(0, Math.min(1, rawH[i] + shift));
+    if (sampleGuide) {
+      // The guide grid is now the dominant low-frequency shape (the real
+      // parent-map geography); rawH is demoted from "the whole shape" to a
+      // smaller-amplitude perturbation layered on top -- the fine detail
+      // that wasn't visible at the parent's coarser resolution.
+      const detailAmp = 0.3; // starting point, tuned visually
+      mesh.cells.forEach((cell, i) => {
+        const guideH = sampleGuide(cell.x / canvas.width, cell.y / canvas.height);
+        heights[i] = Math.max(0, Math.min(1, guideH + (rawH[i] - meanRaw) * detailAmp));
+      });
+    } else {
+      const shift = targetAvgHeight - meanRaw;
+      for (let i = 0; i < rawH.length; i++) heights[i] = Math.max(0, Math.min(1, rawH[i] + shift));
+    }
 
     fillPits(heights, cols, rows, sea);
     applyHydraulicErosion(heights, cols, rows, erosionRng, {});

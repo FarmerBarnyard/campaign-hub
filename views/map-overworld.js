@@ -2100,6 +2100,41 @@ function renderOverworldMap(container) {
     }
     return { avgHeight: n ? hSum / n : 0.5, avgMoisture: n ? mSum / n : 0.5 };
   }
+  // A single averaged number (sampleLocalCharacter above) told the detail
+  // map "roughly how high/wet it is here," but nothing about the actual
+  // SHAPE of the ground -- which way the coast curves, where the real
+  // slope goes. Confirmed directly by account-owner feedback: two clicks
+  // with similar average elevation produced similar-statistics-but-
+  // unrelated terrain, not an actual zoomed-in view of the clicked spot.
+  // This samples a small grid of REAL heights from a window centered on
+  // the click (quantized to one byte each -- plenty of precision for a
+  // shape guide, not for exact replay) so map-detail.js can use the
+  // parent's own real local geography as the dominant shape, with its own
+  // fresh noise demoted to an added-detail perturbation on top. Clamping
+  // cx/cy at the map edge just repeats the edge value outward rather than
+  // wrapping or crashing -- acceptable degenerate behavior for a click
+  // near the coastline/map boundary.
+  // 4:3 to match the detail canvas's own aspect ratio. ZOOM_FACTOR=3 means
+  // the detail canvas shows a window 1/3 the width/height of the overworld
+  // canvas, in overworld pixels -- i.e. it's a 3x zoom-in, not a full-map
+  // shrink. Starting values, tuned visually against real seeds.
+  const DETAIL_GUIDE_W = 32;
+  const DETAIL_GUIDE_H = 24;
+  const DETAIL_ZOOM_FACTOR = 3;
+  function sampleHeightGuide(world, gx, gy, gridW, gridH, windowCellsX, windowCellsY) {
+    const { cols, rows, heights } = world;
+    const bytes = new Uint8Array(gridW * gridH);
+    for (let sy = 0; sy < gridH; sy++) {
+      const fy = (sy + 0.5) / gridH - 0.5; // -0.5..0.5 across the window
+      for (let sx = 0; sx < gridW; sx++) {
+        const fx = (sx + 0.5) / gridW - 0.5;
+        const cx = Math.min(cols - 1, Math.max(0, Math.round(gx + fx * windowCellsX)));
+        const cy = Math.min(rows - 1, Math.max(0, Math.round(gy + fy * windowCellsY)));
+        bytes[sy * gridW + sx] = Math.max(0, Math.min(255, Math.round(heights[cy * cols + cx] * 255)));
+      }
+    }
+    return bytes;
+  }
   canvas.addEventListener('mousemove', (evt) => {
     canvas.style.cursor = (hitTestSettlement(evt) || hitTestLand(evt)) ? 'pointer' : 'default';
   });
@@ -2134,9 +2169,19 @@ function renderOverworldMap(container) {
     const zoneOn = container.querySelector('#ow-wildzones').checked && landHit.zone;
     btn.textContent = `Generate detail map here (${zoneOn ? landHit.zone.label : landHit.biome}) →`;
     btn.addEventListener('click', () => {
+      // The guide grid is what actually carries this spot's real geography
+      // across to map-detail.js (see sampleHeightGuide above) -- h/m/sea
+      // stay as a fallback for old links / the case worldCache.cellW isn't
+      // available for some reason.
+      const guideW = DETAIL_GUIDE_W, guideH = DETAIL_GUIDE_H;
+      const windowCellsX = (canvas.width / DETAIL_ZOOM_FACTOR) / worldCache.cellW;
+      const windowCellsY = (canvas.height / DETAIL_ZOOM_FACTOR) / worldCache.cellH;
+      const guideBytes = sampleHeightGuide(worldCache, landHit.gx, landHit.gy, guideW, guideH, windowCellsX, windowCellsY);
+      const guideB64 = btoa(String.fromCharCode(...guideBytes));
       const url = `#/map/detail?seed=${currentSeed}&x=${Math.round(landHit.x)}&y=${Math.round(landHit.y)}` +
         `&biome=${landHit.biome}&h=${avgHeight.toFixed(3)}&m=${avgMoisture.toFixed(3)}&sea=${seaLevel}` +
-        (zoneOn ? `&zone=${landHit.zone.key}` : '');
+        (zoneOn ? `&zone=${landHit.zone.key}` : '') +
+        `&guide=${encodeURIComponent(guideB64)}&gw=${guideW}&gh=${guideH}&zoom=${DETAIL_ZOOM_FACTOR}`;
       location.hash = url;
     });
     actionEl.appendChild(btn);
