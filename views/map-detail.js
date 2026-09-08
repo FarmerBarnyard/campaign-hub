@@ -25,6 +25,13 @@ const DETAIL_CELL_COUNT = 6000;
 const DETAIL_OCTAVES = 4;
 const DETAIL_CANVAS_W = 800;
 const DETAIL_CANVAS_H = 600;
+// How much faster the added-texture noise oscillates than a standalone
+// terrain's own noise, when a real guide grid is supplying the macro shape
+// (see the guide-grid height blend below) -- without this, the "detail"
+// noise is just another whole-canvas-scale landform at reduced amplitude,
+// competing with the guide for where the coastline actually falls. Starting
+// point, tuned visually.
+const DETAIL_NOISE_FREQ = 8;
 
 // One procedurally-placed landmark per detail map (confirmed via
 // AskUserQuestion: pure terrain with nothing to find felt empty). Keyed off
@@ -253,10 +260,24 @@ function renderDetailMap(container, params) {
     const ridgeAngle = ridgeRng() * Math.PI;
     const ridgedSample = makeAnisotropicSampler(makeRidgedFbmSampler(ridgeRng, Math.min(5, DETAIL_OCTAVES + 1)), ridgeAngle, 1.0, 2.8);
     const ridgeContribution = (x, y) => ridgedSample(x / canvas.width, y / canvas.height);
+    // When a real guide grid is driving the macro shape below, heightSample/
+    // ridgeContribution need to supply genuinely FINE texture, not another
+    // whole-canvas-scale landform: each one's lowest (and heaviest-weighted)
+    // octave is a single broad lobe/ridge spanning the ENTIRE canvas (see
+    // lib/noise.js's 3x3 base lattice) -- confirmed directly as the actual
+    // cause of a real bug, not a hypothetical one: that lobe, even knocked
+    // down to 30% amplitude by detailAmp below, was still enough to redraw
+    // the coastline somewhere else entirely, since land-vs-water is a hard
+    // threshold right at sea level and this noise was the same characteristic
+    // scale as the guide's own macro shape. Sampling at DETAIL_NOISE_FREQ x
+    // the frequency turns that one giant lobe into that many smaller ripples
+    // -- texture riding on top of the guide's real shape, not a second shape
+    // fighting it for which coastline wins.
+    const detailFreq = sampleGuide ? DETAIL_NOISE_FREQ : 1;
     const rawH = new Float64Array(mesh.cells.length);
     mesh.cells.forEach((cell, i) => {
-      const u = cell.x / canvas.width, v = cell.y / canvas.height;
-      rawH[i] = heightSample(u, v) * 0.5 + ridgeContribution(cell.x, cell.y) * 0.75;
+      const u = (cell.x / canvas.width) * detailFreq, v = (cell.y / canvas.height) * detailFreq;
+      rawH[i] = heightSample(u, v) * 0.5 + ridgeContribution(cell.x * detailFreq, cell.y * detailFreq) * 0.75;
     });
     let meanRaw = 0;
     for (let i = 0; i < rawH.length; i++) meanRaw += rawH[i];
