@@ -2036,39 +2036,26 @@ function renderOverworldMap(container) {
   // per-cell data that survives across renders in this closure, same reason
   // the persistent settlement click handler below already relies on it via
   // currentSettlements.
-  function hitTestLand(evt) {
-    if (!worldCache) return null;
-    const { x, y } = canvasToInternal(evt);
-    if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return null;
-    const { cols, rows, cellW, cellH, refBiomeOf, regionOf, regionZoneOf, rangeIndexOf, rangeZoneOf, heights } = worldCache;
-    const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
-    const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
-    const idx = gy * cols + gx;
-    const biome = refBiomeOf[idx];
-    if (biome === 'deepwater' || biome === 'shallowwater') return null;
-    // Which wild zone (if any) actually covers this exact clicked cell --
-    // checked directly against regionZoneOf/rangeZoneOf, not just "is
-    // #ow-wildzones on," so a click outside every rolled zone still opens a
-    // plain detail map even when the checkbox is on. Region zones take
-    // priority (a cell is never in both at once in practice, but region
-    // zones are the more common case). Threaded into the detail-map URL so
-    // that view's generated terrain actually reflects what was clicked,
-    // instead of silently falling back to the plain base biome -- the gap
-    // the account owner flagged directly.
+  // Which wild zone (if any) actually covers a given cell -- checked
+  // directly against regionZoneOf/rangeZoneOf, not just "is #ow-wildzones
+  // on," so a cell outside every rolled zone still reads as zone-less even
+  // when the checkbox is on. Region zones take priority (a cell is never in
+  // both at once in practice, but region zones are the more common case).
+  // Factored out of hitTestLand so the landmark click path below can look up
+  // the SAME zone a landmark's cell might sit in, without a second,
+  // independently-drifting copy of the elevation-band gate (rangeIndexOf
+  // tracks the spatially NEAREST range by noise-envelope value regardless of
+  // a cell's own height, so this mirrors the render pass's own
+  // hillsT/mountainsT/snowT formulas exactly -- confirmed directly as a real
+  // bug once already: without this gate, a beach cell near, not on, a
+  // Volcanic Ashlands range still reported that range's zone).
+  function zoneAtCell(idx) {
+    const { regionOf, regionZoneOf, rangeIndexOf, rangeZoneOf, heights } = worldCache;
     let zone = regionZoneOf[regionOf[idx]] || null;
     if (!zone && rangeIndexOf && rangeZoneOf) {
       const rIdx = rangeIndexOf[idx];
       const candidate = rIdx !== -1 ? rangeZoneOf[rIdx] : null;
       if (candidate) {
-        // rangeIndexOf tracks the spatially NEAREST range by noise-envelope
-        // value regardless of this cell's own height -- a beach cell just
-        // outside a volcanic range's actual painted footprint can still be
-        // its "nearest" range. Mirror the render pass's own elevation-band
-        // gate exactly (same hillsT/mountainsT/snowT formulas as generate())
-        // so a click only "sees" a range zone where it's actually painted,
-        // confirmed directly: without this gate, clicking a beach cell near
-        // (not on) a Volcanic Ashlands range still labeled the detail-map
-        // button with that zone.
         const ruggedBias = parseInt(container.querySelector('#ow-rugged-bias').value, 10) / 100;
         const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
         const hillsT = Math.max(seaLevel + 0.08, 0.55 - ruggedBias);
@@ -2081,7 +2068,37 @@ function renderOverworldMap(container) {
         if (inBand) zone = candidate;
       }
     }
-    return { x, y, gx, gy, idx, biome, zone };
+    return zone;
+  }
+  function hitTestLand(evt) {
+    if (!worldCache) return null;
+    const { x, y } = canvasToInternal(evt);
+    if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return null;
+    const { cols, rows, cellW, cellH, refBiomeOf } = worldCache;
+    const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
+    const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
+    const idx = gy * cols + gx;
+    const biome = refBiomeOf[idx];
+    if (biome === 'deepwater' || biome === 'shallowwater') return null;
+    return { x, y, gx, gy, idx, biome, zone: zoneAtCell(idx) };
+  }
+  // Point-feature wild-zone landmarks (Ley Line Nexus, Astral Scar, Giant's
+  // Garden, Sunken Ruins) are drawn (see the wildZonesOn-gated loop in
+  // generate()) but were never click-targets -- clicking one fell through to
+  // hitTestLand's generic "empty terrain" path, which had no idea a specific
+  // named landmark was right there, so it opened an unrelated detail map
+  // with its own randomly-placed, differently-named landmark. Same
+  // padding-for-easier-hitting pattern as hitTestSettlement; only live when
+  // the icons themselves are (wildZonesOn), same as their own draw gate.
+  function hitTestLandmark(evt) {
+    if (!worldCache || !container.querySelector('#ow-wildzones').checked) return null;
+    const { x, y } = canvasToInternal(evt);
+    let best = null, bestDist = Infinity;
+    (worldCache.landmarks || []).forEach((lm) => {
+      const d = Math.hypot(lm.x - x, lm.y - y);
+      if (d <= 14 && d < bestDist) { best = lm; bestDist = d; }
+    });
+    return best;
   }
   // Neighborhood average (not the single clicked cell) so a detail map's
   // bias reflects the general character of the area rather than one noise
@@ -2157,8 +2174,28 @@ function renderOverworldMap(container) {
     }
     return bytes;
   }
+  // Shared by both the empty-terrain click and the landmark click below --
+  // pulled out so the guide-sampling/URL-building logic (the part that took
+  // several rounds to get right: real geography, not just averaged
+  // statistics) exists in exactly one place rather than as two copies that
+  // could silently drift apart. `extraParams` is an already-built query
+  // string suffix (e.g. `&poi=...`) or ''.
+  function buildDetailMapUrl(x, y, gx, gy, biome, zone, extraParams) {
+    const { avgHeight, avgMoisture } = sampleLocalCharacter(worldCache, gx, gy, 4);
+    const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
+    const guideW = DETAIL_GUIDE_W, guideH = DETAIL_GUIDE_H;
+    const windowCellsX = (canvas.width / DETAIL_ZOOM_FACTOR) / worldCache.cellW;
+    const windowCellsY = (canvas.height / DETAIL_ZOOM_FACTOR) / worldCache.cellH;
+    const guideBytes = sampleHeightGuide(worldCache, gx, gy, guideW, guideH, windowCellsX, windowCellsY);
+    const guideB64 = btoa(String.fromCharCode(...guideBytes));
+    return `#/map/detail?seed=${currentSeed}&x=${Math.round(x)}&y=${Math.round(y)}` +
+      `&biome=${biome}&h=${avgHeight.toFixed(3)}&m=${avgMoisture.toFixed(3)}&sea=${seaLevel}` +
+      (zone ? `&zone=${zone.key}` : '') +
+      `&guide=${encodeURIComponent(guideB64)}&gw=${guideW}&gh=${guideH}&zoom=${DETAIL_ZOOM_FACTOR}` +
+      (extraParams || '');
+  }
   canvas.addEventListener('mousemove', (evt) => {
-    canvas.style.cursor = (hitTestSettlement(evt) || hitTestLand(evt)) ? 'pointer' : 'default';
+    canvas.style.cursor = (hitTestSettlement(evt) || hitTestLandmark(evt) || hitTestLand(evt)) ? 'pointer' : 'default';
   });
   canvas.addEventListener('click', (evt) => {
     const hit = hitTestSettlement(evt);
@@ -2175,6 +2212,30 @@ function renderOverworldMap(container) {
       actionEl.appendChild(btn);
       return;
     }
+    // Point-feature wild-zone landmark click: unlike an empty-terrain click,
+    // this spot has a specific, already-named feature on it (e.g. "Ley Line
+    // Nexus of Kharzhall") -- threaded through as `poi`/`poiLabel`/`poiName`
+    // so map-detail.js can force that exact landmark into its own landmark
+    // slot instead of rolling a fresh, unrelated one, the same gap fixed
+    // for wild zones themselves earlier.
+    const landmarkHit = hitTestLandmark(evt);
+    if (landmarkHit) {
+      const { cols, rows, cellW, cellH, refBiomeOf } = worldCache;
+      const gx = Math.min(cols - 1, Math.max(0, Math.floor(landmarkHit.x / cellW)));
+      const gy = Math.min(rows - 1, Math.max(0, Math.floor(landmarkHit.y / cellH)));
+      const idx = gy * cols + gx;
+      const biome = refBiomeOf[idx];
+      const zone = zoneAtCell(idx);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = `Generate detail map for ${landmarkHit.name} →`;
+      btn.addEventListener('click', () => {
+        const extra = `&poi=${landmarkHit.key}&poiLabel=${encodeURIComponent(landmarkHit.label)}&poiName=${encodeURIComponent(landmarkHit.name)}`;
+        location.hash = buildDetailMapUrl(landmarkHit.x, landmarkHit.y, gx, gy, biome, zone, extra);
+      });
+      actionEl.appendChild(btn);
+      return;
+    }
     // Empty-terrain click: offer a zoomed-in detail map of this spot. Only
     // 4 scalars cross the URL (biome for the button label; h/m/sea as the
     // actual thematic anchor) -- everything else (the detail map's actual
@@ -2184,27 +2245,12 @@ function renderOverworldMap(container) {
     // than reusing this map's own mesh geometry.
     const landHit = hitTestLand(evt);
     if (!landHit) return;
-    const { avgHeight, avgMoisture } = sampleLocalCharacter(worldCache, landHit.gx, landHit.gy, 4);
-    const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
     const btn = document.createElement('button');
     btn.type = 'button';
     const zoneOn = container.querySelector('#ow-wildzones').checked && landHit.zone;
     btn.textContent = `Generate detail map here (${zoneOn ? landHit.zone.label : landHit.biome}) →`;
     btn.addEventListener('click', () => {
-      // The guide grid is what actually carries this spot's real geography
-      // across to map-detail.js (see sampleHeightGuide above) -- h/m/sea
-      // stay as a fallback for old links / the case worldCache.cellW isn't
-      // available for some reason.
-      const guideW = DETAIL_GUIDE_W, guideH = DETAIL_GUIDE_H;
-      const windowCellsX = (canvas.width / DETAIL_ZOOM_FACTOR) / worldCache.cellW;
-      const windowCellsY = (canvas.height / DETAIL_ZOOM_FACTOR) / worldCache.cellH;
-      const guideBytes = sampleHeightGuide(worldCache, landHit.gx, landHit.gy, guideW, guideH, windowCellsX, windowCellsY);
-      const guideB64 = btoa(String.fromCharCode(...guideBytes));
-      const url = `#/map/detail?seed=${currentSeed}&x=${Math.round(landHit.x)}&y=${Math.round(landHit.y)}` +
-        `&biome=${landHit.biome}&h=${avgHeight.toFixed(3)}&m=${avgMoisture.toFixed(3)}&sea=${seaLevel}` +
-        (zoneOn ? `&zone=${landHit.zone.key}` : '') +
-        `&guide=${encodeURIComponent(guideB64)}&gw=${guideW}&gh=${guideH}&zoom=${DETAIL_ZOOM_FACTOR}`;
-      location.hash = url;
+      location.hash = buildDetailMapUrl(landHit.x, landHit.y, landHit.gx, landHit.gy, landHit.biome, zoneOn ? landHit.zone : null, '');
     });
     actionEl.appendChild(btn);
   });

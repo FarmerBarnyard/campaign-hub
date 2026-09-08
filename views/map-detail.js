@@ -45,6 +45,12 @@ const LANDMARK_TYPES = {
   plains: [{ key: 'ruins', label: 'Ruins' }, { key: 'camp', label: 'Camp' }],
 };
 
+// Keys that come from the overworld's own POINT_LANDMARK_TYPES table (see
+// lib/map-biome-zones.js) rather than LANDMARK_TYPES above -- when a detail
+// map is opened from clicking one of these on the parent map, its icon is
+// drawn via map-overworld.js's drawWildZoneIcon instead of drawLandmarkIcon.
+const OVERWORLD_POI_ICON_KEYS = new Set(['leyLineNexus', 'astralScar', 'giantsGarden', 'sunkenRuins']);
+
 // Simple canvas-path glyphs (no image assets), in the same spirit as
 // drawCornerMedallion/paintRosetteTexture elsewhere in this generator.
 function drawLandmarkIcon(ctx, x, y, key, ink) {
@@ -143,6 +149,16 @@ function renderDetailMap(container, params) {
   // zone.
   const zone = findZoneByKey(params.get('zone'));
   const locationLabel = zone ? zone.label : biome;
+  // Set when this detail map was opened from a specific, already-named
+  // point-feature wild-zone landmark (Ley Line Nexus, Astral Scar, Giant's
+  // Garden, Sunken Ruins -- see map-overworld.js's hitTestLandmark) rather
+  // than a plain empty-terrain click. Forces that exact landmark into the
+  // landmark slot below instead of rolling a fresh, unrelated one -- the
+  // same "what you clicked is what you get" gap already closed for wild
+  // zones and geography.
+  const poiKey = params.get('poi');
+  const poiLabel = params.get('poiLabel');
+  const poiName = params.get('poiName');
   // The guide grid (see map-overworld.js's sampleHeightGuide) carries the
   // parent map's REAL local height shape across the route boundary -- the
   // account owner correctly pointed out that h/m/sea alone (a single
@@ -371,11 +387,21 @@ function renderDetailMap(container, params) {
       candidates.sort((a, b) => a.dist - b.dist);
       const pickFrom = Math.max(1, Math.floor(candidates.length / 3));
       const pick = candidates[Math.floor(landmarkRng() * pickFrom)];
-      const category = BIOME_TO_NAME_CATEGORY[biome] || 'plains';
-      const types = LANDMARK_TYPES[category] || LANDMARK_TYPES.plains;
-      const type = types[Math.floor(landmarkRng() * types.length)];
-      const baseName = generateSettlementName(landmarkRng, 'village', category);
-      landmark = { x: pick.cell.x, y: pick.cell.y, idx: pick.i, type, name: `${type.label} of ${baseName}` };
+      let type, name;
+      if (poiKey) {
+        // The account owner clicked this exact landmark on the overworld --
+        // its identity is fixed, not rolled. landmarkRng isn't consumed any
+        // further here (nothing downstream reads it again either way), so
+        // skipping the type/name rolls doesn't desync anything else.
+        type = { key: poiKey, label: poiLabel || poiKey };
+        name = poiName || poiLabel || poiKey;
+      } else {
+        const category = BIOME_TO_NAME_CATEGORY[biome] || 'plains';
+        const types = LANDMARK_TYPES[category] || LANDMARK_TYPES.plains;
+        type = types[Math.floor(landmarkRng() * types.length)];
+        name = `${type.label} of ${generateSettlementName(landmarkRng, 'village', category)}`;
+      }
+      landmark = { x: pick.cell.x, y: pick.cell.y, idx: pick.i, type, name };
     }
     lastLandmarkName = landmark ? landmark.name : null;
 
@@ -550,7 +576,19 @@ function renderDetailMap(container, params) {
     );
 
     if (landmark) {
-      drawLandmarkIcon(ctx, landmark.x, landmark.y, landmark.type.key, palette.ink);
+      // A POI-forced landmark's key comes from POINT_LANDMARK_TYPES (the
+      // overworld's own wild-zone landmark table: leyLineNexus/astralScar/
+      // giantsGarden/sunkenRuins) rather than this file's LANDMARK_TYPES, so
+      // drawLandmarkIcon (which only knows ruins/shrine/watchtower/camp/
+      // wreck) wouldn't draw anything for it. drawWildZoneIcon is the
+      // function map-overworld.js already uses to draw these same icons on
+      // the parent map -- loaded before this file (see index.html's script
+      // order) and reused here rather than re-implementing the glyphs.
+      if (OVERWORLD_POI_ICON_KEYS.has(landmark.type.key)) {
+        drawWildZoneIcon(ctx, landmark.x, landmark.y, landmark.type.key, palette.ink);
+      } else {
+        drawLandmarkIcon(ctx, landmark.x, landmark.y, landmark.type.key, palette.ink);
+      }
       ctx.font = `bold 11px ${OW_SERIF}`;
       ctx.fillStyle = labelColorFor(refBiomeOf[landmark.idx], palette);
       ctx.textAlign = 'center';
