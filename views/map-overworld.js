@@ -1480,6 +1480,12 @@ function renderOverworldMap(container) {
 
   // Builds one path from every closed loop in `loops` -- shared by the two
   // helpers below, which differ only in what they do with that path.
+  // Smoothing (see smoothLoops below) is applied by the caller, selectively,
+  // rather than in here -- applying it unconditionally to every band fill
+  // (forest/barrens/highland/snow/wild-zone/lake, on top of the coastline
+  // loops) measured at ~2.1s added at Continent tier's 250k-cell ceiling,
+  // which is real enough to matter for a Regenerate click. Only the loops
+  // that actually define the coastline silhouette get smoothed.
   function pathFromLoops(loops) {
     ctx.beginPath();
     for (const loop of loops) {
@@ -1487,6 +1493,33 @@ function renderOverworldMap(container) {
       for (let i = 1; i < loop.length; i++) ctx.lineTo(loop[i].x, loop[i].y);
       ctx.closePath();
     }
+  }
+  // Rounds off the raw marching-squares polygon extractFillableRegions
+  // returns -- used selectively (just the water/beach/land loops that
+  // actually define the coastline silhouette, see generate() below) rather
+  // than inside pathFromLoops itself, since smoothing every band fill
+  // (forest/barrens/highland/snow/wild-zone/lake, dozens of loops each
+  // generate()) measured at ~2.1s added at Continent tier's 250k-cell
+  // ceiling -- real enough to matter for a Regenerate click, and those
+  // interior band edges weren't what read as jagged in the first place.
+  // Even scoped to just the coastline loops, the cost turned out to be
+  // dominated by point COUNT, not iteration count -- a single Chaikin pass
+  // on a Continent-tier coastline (many thousands of marching-squares
+  // points) still cost the same ~2.1s (measured directly: 348ms raw, 2456ms
+  // at one iteration, no meaningful difference at two). Decimating to a
+  // fixed point budget BEFORE smoothing fixes this at the actual source --
+  // Chaikin's whole purpose is rounding corners, which doesn't need every
+  // single grid-cell-edge vertex to begin with, so this loses only
+  // redundant, sub-visible detail. `capacity` bounds the corner-cutting
+  // curve to the same visual precision regardless of loop size, so Standard
+  // and Continent tier read the same amount of "roundedness".
+  function smoothLoops(loops, iterations) {
+    const capacity = 600;
+    return loops.map((loop) => {
+      const stride = Math.max(1, Math.floor(loop.length / capacity));
+      const decimated = stride > 1 ? loop.filter((_, i) => i % stride === 0) : loop;
+      return chaikinSmoothClosed(decimated, iterations);
+    });
   }
   // Fills every closed loop in `loops` together in one path using the
   // evenodd rule -- correctly punches out interior holes (an enclosed
@@ -1607,13 +1640,17 @@ function renderOverworldMap(container) {
     ctx.fillStyle = palette.biomes.deepwater;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     fillLoopsEvenOdd(
-      extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel - 0.08, canvas.width, canvas.height, minLoopArea),
+      smoothLoops(extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel - 0.08, canvas.width, canvas.height, minLoopArea), 2),
       palette.biomes.shallowwater
     );
+    // beachLoops/landLoops themselves stay RAW -- reused below for the
+    // coastline emphasis stroke (its own chaikinSmooth call) and for
+    // clipToLoops, neither of which needs (or should pay twice for) a
+    // pre-smoothed copy. Only the fill gets the smoothed version.
     const beachLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel, canvas.width, canvas.height, minLoopArea);
-    fillLoopsEvenOdd(beachLoops, palette.biomes.beach);
+    fillLoopsEvenOdd(smoothLoops(beachLoops, 2), palette.biomes.beach);
     const landLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, seaLevel + 0.03, canvas.width, canvas.height, minLoopArea);
-    fillLoopsEvenOdd(landLoops, palette.biomes.plains);
+    fillLoopsEvenOdd(smoothLoops(landLoops, 2), palette.biomes.plains);
 
     // Fixed-pixel texture scatter (tree/rosette/plains-lean/beach-dot/snow-
     // cross), replacing the old one-call-per-Voronoi-cell placement -- the

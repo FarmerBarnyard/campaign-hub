@@ -228,6 +228,23 @@ function renderDetailMap(container, params) {
       ctx.closePath();
     }
   }
+  // Rounds off the raw marching-squares polygon extractFillableRegions
+  // returns -- applied selectively, just to the water/land loops that
+  // define the coastline silhouette (see generate() below), the same
+  // targeted approach map-overworld.js uses and for the same reason:
+  // smoothing every band fill measured as a real, avoidable cost at
+  // Continent-tier cell counts, and the interior band edges weren't what
+  // read as jagged in the first place. Decimated to a fixed point budget
+  // before smoothing -- see map-overworld.js's own smoothLoops for why
+  // (point count, not iteration count, turned out to be the actual cost).
+  function smoothLoops(loops, iterations) {
+    const capacity = 600;
+    return loops.map((loop) => {
+      const stride = Math.max(1, Math.floor(loop.length / capacity));
+      const decimated = stride > 1 ? loop.filter((_, i) => i % stride === 0) : loop;
+      return chaikinSmoothClosed(decimated, iterations);
+    });
+  }
   function fillLoopsEvenOdd(loops, fillStyle) {
     if (loops.length === 0) return;
     ctx.fillStyle = fillStyle;
@@ -417,13 +434,16 @@ function renderDetailMap(container, params) {
     ctx.fillStyle = palette.biomes.deepwater;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     fillLoopsEvenOdd(
-      extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea - 0.08, canvas.width, canvas.height, minLoopArea),
+      smoothLoops(extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea - 0.08, canvas.width, canvas.height, minLoopArea), 2),
       palette.biomes.shallowwater
     );
+    // beachLoops/landLoops stay RAW -- reused below for the coastline
+    // emphasis stroke and clipToLoops, neither of which needs a pre-smoothed
+    // copy. Only the fill gets the smoothed version.
     const beachLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea, canvas.width, canvas.height, minLoopArea);
-    fillLoopsEvenOdd(beachLoops, palette.biomes.beach);
+    fillLoopsEvenOdd(smoothLoops(beachLoops, 2), palette.biomes.beach);
     const landLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea + 0.03, canvas.width, canvas.height, minLoopArea);
-    fillLoopsEvenOdd(landLoops, palette.biomes.plains);
+    fillLoopsEvenOdd(smoothLoops(landLoops, 2), palette.biomes.plains);
 
     const spacing = Math.max(16, Math.min(canvas.width, canvas.height) / 24);
     function biomeAtPoint(x, y) {
