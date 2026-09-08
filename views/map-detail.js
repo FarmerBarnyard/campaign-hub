@@ -109,6 +109,15 @@ function clampParam(raw, fallback) {
   return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
 }
 
+// Looks up a wild-zone type by key across both of lib/map-biome-zones.js's
+// tables -- the overworld click handler doesn't know (or need to know)
+// which table a given key came from, it just passes the key straight
+// through the URL.
+function findZoneByKey(key) {
+  if (!key) return null;
+  return SPECIAL_ZONE_TYPES.find((z) => z.key === key) || RANGE_ZONE_TYPES.find((z) => z.key === key) || null;
+}
+
 function renderDetailMap(container, params) {
   const overworldSeed = parseInt(params.get('seed'), 10) || 1;
   const clickX = parseFloat(params.get('x')) || 0;
@@ -118,6 +127,15 @@ function renderDetailMap(container, params) {
   const targetAvgMoisture = clampParam(params.get('m'), 0.5);
   const sea = clampParam(params.get('sea'), 0.42);
   const seed = deriveDetailSeed(overworldSeed, clickX, clickY, DETAIL_CANVAS_W);
+  // Set (not just carried through) when the clicked cell was inside an
+  // actual rolled wild zone -- confirmed via direct account-owner feedback
+  // that clicking into e.g. a Fungal Forest patch on the overworld
+  // regenerated a plain, unrelated forest detail map with no trace of what
+  // was actually clicked. Applied as an overlay in generate() below, same
+  // wash-then-icon-scatter pattern the overworld itself uses for the same
+  // zone.
+  const zone = findZoneByKey(params.get('zone'));
+  const locationLabel = zone ? zone.label : biome;
 
   container.innerHTML = `
     <h2 id="dt-heading">Detail map</h2>
@@ -125,7 +143,7 @@ function renderDetailMap(container, params) {
     <div class="map-layout">
       <div class="map-controls">
         <label>Theme <select id="dt-theme"></select></label>
-        <p class="status-text">Derived from overworld seed ${overworldSeed} at this location (${biome}) -- fixed, can't be reseeded independently.</p>
+        <p class="status-text">Derived from overworld seed ${overworldSeed} at this location (${locationLabel}) -- fixed, can't be reseeded independently.</p>
         <hr>
         <button id="dt-export">Export PNG</button>
         <label>Save as <input id="dt-filename" placeholder="filename.png" autocomplete="off"></label>
@@ -246,6 +264,30 @@ function renderDetailMap(container, params) {
       refBiomeOf[i] = biomeAt(heights[i], m, sea, 0, 0);
     });
 
+    // Wild-zone overlay setup, mirroring the overworld's own buildWorld
+    // derivation exactly: wetlowlandOf is a derived flag (only computed
+    // when actually needed, i.e. Bone Marsh/Feywild Bog), and Frostfell
+    // overrides refBiome itself (a forced snow cap) rather than being a
+    // recolor -- applied here, before the landmark candidate filter and
+    // the render pipeline below, so both naturally treat this patch as
+    // snow-covered.
+    let wetlowlandOf = null;
+    if (zone && zone.baseBiome === 'wetlowland') {
+      const wetlowlandHillsT = Math.max(sea + 0.08, 0.55);
+      const marshMoistureT = 0.62;
+      wetlowlandOf = new Uint8Array(mesh.cells.length);
+      for (let i = 0; i < mesh.cells.length; i++) {
+        const rb = refBiomeOf[i];
+        wetlowlandOf[i] = (rb === 'plains' || rb === 'beach') && heights[i] < wetlowlandHillsT &&
+          (mOf[i] > marshMoistureT || nearRiver[i] > 0) ? 1 : 0;
+      }
+    }
+    if (zone && zone.forcesSnow) {
+      for (let i = 0; i < mesh.cells.length; i++) {
+        if (heights[i] >= sea) refBiomeOf[i] = 'snow';
+      }
+    }
+
     // Landmark: one candidate biased toward the canvas center, excluded
     // from steep terrain (hills/mountains/snow) and from beach, so it
     // plausibly sits on land someone could actually walk to. Picked from
@@ -337,6 +379,52 @@ function renderDetailMap(container, params) {
       }
     }
 
+    // Wild-zone overlay: the same "recolor + icon-scatter, additive, on top
+    // of everything already painted" pattern the overworld itself uses --
+    // applied across the WHOLE detail patch rather than gated to one
+    // region, since a click-to-zoom into a specific zone should read as a
+    // close-up of that zone throughout, not just a corner of it. Special
+    // zones (has baseBiome) recolor matching cells; range zones (has
+    // appliesTo instead) recolor an elevation band. Frostfell has no wash
+    // of its own -- it already painted as ordinary snow above via the
+    // forced refBiome override, so it's excluded here.
+    if (zone && !zone.forcesSnow) {
+      const zoneAt = zone.baseBiome
+        ? (i) => {
+            if (zone.baseBiome === 'wetlowland') return wetlowlandOf[i] ? 1 : 0;
+            if (zone.baseBiome === 'any') return heights[i] >= sea ? 1 : 0;
+            return refBiomeOf[i] === zone.baseBiome ? 1 : 0;
+          }
+        : (i) => {
+            if (zone.appliesTo === 'snowOnly') return heights[i] >= snowT ? 1 : 0;
+            if (zone.appliesTo === 'rangeBase') return (heights[i] >= hillsT && heights[i] < mountainsT) ? 1 : 0;
+            return heights[i] >= hillsT ? 1 : 0; // 'range'
+          };
+      function scatterZoneIcons() {
+        for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
+          for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
+            const px = sx + (textureRng() - 0.5) * spacing * 0.6;
+            const py = sy + (textureRng() - 0.5) * spacing * 0.6;
+            const gx = Math.min(cols - 1, Math.max(0, Math.floor(px / cellW)));
+            const gy = Math.min(rows - 1, Math.max(0, Math.floor(py / cellH)));
+            if (!zoneAt(gy * cols + gx)) continue;
+            drawWildZoneIcon(ctx, px, py, zone.iconKey, palette.ink);
+          }
+        }
+      }
+      if (zone.appliesTo === 'snowOnly') {
+        scatterZoneIcons();
+      } else {
+        const zoneLoops = extractFillableRegions(cols, rows, cellW, cellH, zoneAt, 0.5, canvas.width, canvas.height, minLoopArea);
+        if (zoneLoops.length > 0) {
+          for (const group of groupChainsIntoLoops(zoneLoops)) {
+            paintWatercolorWash(ctx, group, washRng, palette.wash[zone.washKey], palette.ink, 24);
+          }
+          scatterZoneIcons();
+        }
+      }
+    }
+
     fillLoopsEvenOdd(
       extractFillableRegions(cols, rows, cellW, cellH, heightAt, snowT, canvas.width, canvas.height, minLoopArea),
       palette.biomes.snow
@@ -411,7 +499,7 @@ function renderDetailMap(container, params) {
   }
 
   generate();
-  container.querySelector('#dt-heading').textContent = lastLandmarkName ? `${lastLandmarkName} (${biome} detail map)` : `Detail map (${biome})`;
+  container.querySelector('#dt-heading').textContent = lastLandmarkName ? `${lastLandmarkName} (${locationLabel} detail map)` : `Detail map (${locationLabel})`;
   container.querySelector('#dt-theme').addEventListener('change', generate);
   wireMapExportSave(container, canvas, 'dt', (offCtx) => {
     const prevCtx = ctx;

@@ -489,7 +489,15 @@ function labelColorFor(biome, palette) {
 // plain light card regardless of theme, matching how a legend box reads as
 // its own neutral overlay on real maps rather than adopting the map's own
 // palette.
-function drawMapLegend(ctx, canvas, palette) {
+// `activeZones` (optional) lists the specific wild-zone type OBJECTS that
+// actually rolled on THIS map (deduplicated by key) -- not the full ~15-zone
+// catalog, which would make the legend enormous and mostly irrelevant to any
+// one map. A zone with a washKey gets its own swatch, converted from the
+// theme's HSL wash tone into a CSS color the same way paintWatercolorWash
+// itself would render it at full opacity; Frostfell (forcesSnow, no washKey
+// of its own) shows the ordinary snow swatch, matching what it actually
+// paints as (a refBiome override to 'snow', not a distinct recolor).
+function drawMapLegend(ctx, canvas, palette, activeZones) {
   const rows = [
     { type: 'swatch', color: palette.biomes.deepwater, label: 'Deep water' },
     { type: 'swatch', color: palette.biomes.shallowwater, label: 'Shallow water' },
@@ -507,6 +515,12 @@ function drawMapLegend(ctx, canvas, palette) {
     { type: 'line', color: palette.coastline, label: 'Coastline' },
     { type: 'line', color: palette.road, label: 'Road' },
   ];
+  (activeZones || []).forEach((zone) => {
+    const color = zone.forcesSnow || !zone.washKey
+      ? palette.biomes.snow
+      : `hsl(${palette.wash[zone.washKey].h}, ${palette.wash[zone.washKey].s}%, ${palette.wash[zone.washKey].l}%)`;
+    rows.push({ type: 'swatch', color, label: zone.label });
+  });
   const rowH = 15, padding = 10, swatchSize = 11;
   const boxWidth = 130;
   const boxHeight = rows.length * rowH + padding * 2;
@@ -1935,7 +1949,24 @@ function renderOverworldMap(container) {
 
     paintParchmentGrain(ctx, canvas, grainRng, palette.grain);
 
-    if (legendOn) drawMapLegend(ctx, canvas, palette);
+    if (legendOn) {
+      // Whichever wild-zone types actually rolled on THIS map, deduplicated
+      // by key -- the account owner correctly pointed out that a colored
+      // patch with no legend entry reads as unexplained, not as content.
+      const activeZones = [];
+      const seenZoneKeys = new Set();
+      if (wildZonesOn) {
+        for (const zone of regionZoneOf) {
+          if (zone && !seenZoneKeys.has(zone.key)) { seenZoneKeys.add(zone.key); activeZones.push(zone); }
+        }
+        if (rangeZoneOf) {
+          for (const zone of rangeZoneOf) {
+            if (zone && !seenZoneKeys.has(zone.key)) { seenZoneKeys.add(zone.key); activeZones.push(zone); }
+          }
+        }
+      }
+      drawMapLegend(ctx, canvas, palette, activeZones);
+    }
 
     drawCompassRose(ctx, canvas.width - 50, 50, 28, palette.coastline);
     drawMapVignetteAndBorder(ctx, canvas, palette.coastline, borderRng);
@@ -2009,13 +2040,48 @@ function renderOverworldMap(container) {
     if (!worldCache) return null;
     const { x, y } = canvasToInternal(evt);
     if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return null;
-    const { cols, rows, cellW, cellH, refBiomeOf } = worldCache;
+    const { cols, rows, cellW, cellH, refBiomeOf, regionOf, regionZoneOf, rangeIndexOf, rangeZoneOf, heights } = worldCache;
     const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
     const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
     const idx = gy * cols + gx;
     const biome = refBiomeOf[idx];
     if (biome === 'deepwater' || biome === 'shallowwater') return null;
-    return { x, y, gx, gy, idx, biome };
+    // Which wild zone (if any) actually covers this exact clicked cell --
+    // checked directly against regionZoneOf/rangeZoneOf, not just "is
+    // #ow-wildzones on," so a click outside every rolled zone still opens a
+    // plain detail map even when the checkbox is on. Region zones take
+    // priority (a cell is never in both at once in practice, but region
+    // zones are the more common case). Threaded into the detail-map URL so
+    // that view's generated terrain actually reflects what was clicked,
+    // instead of silently falling back to the plain base biome -- the gap
+    // the account owner flagged directly.
+    let zone = regionZoneOf[regionOf[idx]] || null;
+    if (!zone && rangeIndexOf && rangeZoneOf) {
+      const rIdx = rangeIndexOf[idx];
+      const candidate = rIdx !== -1 ? rangeZoneOf[rIdx] : null;
+      if (candidate) {
+        // rangeIndexOf tracks the spatially NEAREST range by noise-envelope
+        // value regardless of this cell's own height -- a beach cell just
+        // outside a volcanic range's actual painted footprint can still be
+        // its "nearest" range. Mirror the render pass's own elevation-band
+        // gate exactly (same hillsT/mountainsT/snowT formulas as generate())
+        // so a click only "sees" a range zone where it's actually painted,
+        // confirmed directly: without this gate, clicking a beach cell near
+        // (not on) a Volcanic Ashlands range still labeled the detail-map
+        // button with that zone.
+        const ruggedBias = parseInt(container.querySelector('#ow-rugged-bias').value, 10) / 100;
+        const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
+        const hillsT = Math.max(seaLevel + 0.08, 0.55 - ruggedBias);
+        const mountainsT = Math.max(hillsT + 0.05, 0.7 - ruggedBias);
+        const snowT = Math.max(mountainsT + 0.05, 0.85 - ruggedBias);
+        const h = heights[idx];
+        const inBand = candidate.appliesTo === 'snowOnly' ? h >= snowT
+          : candidate.appliesTo === 'rangeBase' ? (h >= hillsT && h < mountainsT)
+          : h >= hillsT;
+        if (inBand) zone = candidate;
+      }
+    }
+    return { x, y, gx, gy, idx, biome, zone };
   }
   // Neighborhood average (not the single clicked cell) so a detail map's
   // bias reflects the general character of the area rather than one noise
@@ -2065,10 +2131,12 @@ function renderOverworldMap(container) {
     const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.textContent = `Generate detail map here (${landHit.biome}) →`;
+    const zoneOn = container.querySelector('#ow-wildzones').checked && landHit.zone;
+    btn.textContent = `Generate detail map here (${zoneOn ? landHit.zone.label : landHit.biome}) →`;
     btn.addEventListener('click', () => {
       const url = `#/map/detail?seed=${currentSeed}&x=${Math.round(landHit.x)}&y=${Math.round(landHit.y)}` +
-        `&biome=${landHit.biome}&h=${avgHeight.toFixed(3)}&m=${avgMoisture.toFixed(3)}&sea=${seaLevel}`;
+        `&biome=${landHit.biome}&h=${avgHeight.toFixed(3)}&m=${avgMoisture.toFixed(3)}&sea=${seaLevel}` +
+        (zoneOn ? `&zone=${landHit.zone.key}` : '');
       location.hash = url;
     });
     actionEl.appendChild(btn);
