@@ -365,6 +365,33 @@ function renderTerrainPatch(ctx, canvas, opts) {
   const landLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea + 0.03, canvas.width, canvas.height, minLoopArea);
   fillLoopsEvenOdd(smoothLoops(landLoops, 2), palette.biomes.plains);
 
+  // Ground-truth containment test, built from the SAME loops (beachLoops)
+  // that actually got painted above -- guards every land-only decoration
+  // pass below (texture scatter, rosette texture, wild-zone icons, and the
+  // caller's own landmark placement via the returned isGroundAt) against a
+  // real bug: refBiomeOf/heightAt are per-CELL classifications with no
+  // area/contiguity requirement, so a lone or thinly-scattered cell can
+  // read as "land" (and even "forest") from noise alone while never being
+  // part of a blob large enough to survive extractFillableRegions' minArea
+  // filter -- i.e. it was never actually painted. Before this guard,
+  // exactly that mismatch produced tree icons (and once, a landmark)
+  // scattered across open water wherever the guide height sat close to sea
+  // level and the fine per-cell noise pushed isolated cells above/below the
+  // threshold at high spatial frequency -- confirmed via a print-tile
+  // export whose guide window was mostly ocean. isPointInPath respects the
+  // canvas's current transform, so this stays correct under
+  // wireMapExportSave's hi-res ctx.scale(2,2) export path too.
+  const groundPath = new Path2D();
+  for (const loop of beachLoops) {
+    if (loop.length === 0) continue;
+    groundPath.moveTo(loop[0].x, loop[0].y);
+    for (let i = 1; i < loop.length; i++) groundPath.lineTo(loop[i].x, loop[i].y);
+    groundPath.closePath();
+  }
+  function isGroundAt(x, y) {
+    return beachLoops.length > 0 && ctx.isPointInPath(groundPath, x, y, 'evenodd');
+  }
+
   const spacing = Math.max(16, Math.min(canvas.width, canvas.height) / 24);
   function biomeAtPoint(x, y) {
     const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
@@ -377,6 +404,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
       const py = sy + (textureRng() - 0.5) * spacing * 0.6;
       const b = biomeAtPoint(px, py);
       if (b === 'hills' || b === 'mountains' || b === 'forest') continue;
+      if (b !== 'deepwater' && b !== 'shallowwater' && !isGroundAt(px, py)) continue;
       paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink);
     }
   }
@@ -403,6 +431,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
       const px = sx + (textureRng() - 0.5) * spacing * 0.6;
       const py = sy + (textureRng() - 0.5) * spacing * 0.6;
       const b = biomeAtPoint(px, py);
+      if (!isGroundAt(px, py)) continue;
       if (b === 'hills' || b === 'mountains') {
         paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, b === 'mountains');
       } else if (b === 'forest') {
@@ -440,6 +469,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
           const gx = Math.min(cols - 1, Math.max(0, Math.floor(px / cellW)));
           const gy = Math.min(rows - 1, Math.max(0, Math.floor(py / cellH)));
           if (!zoneAt(gy * cols + gx)) continue;
+          if (!isGroundAt(px, py)) continue;
           drawWildZoneIcon(ctx, px, py, zone.iconKey, palette.ink);
         }
       }
@@ -516,7 +546,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
     palette.lake
   );
 
-  return { mesh, cols, rows, cellW, cellH, heights, mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, hillsT, mountainsT, snowT, beachLoops, landLoops, wetlowlandOf };
+  return { mesh, cols, rows, cellW, cellH, heights, mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, hillsT, mountainsT, snowT, beachLoops, landLoops, wetlowlandOf, isGroundAt };
 }
 
 function renderDetailMap(container, params) {
@@ -598,6 +628,13 @@ function renderDetailMap(container, params) {
       if (heights[i] < sea + 0.03) return;
       const b = refBiomeOf[i];
       if (b === 'hills' || b === 'mountains' || b === 'snow') return;
+      // refBiomeOf/heights are per-cell classifications with no area/
+      // contiguity requirement -- without this check, a lone noise-driven
+      // cell that reads as "land" can get picked even though it was never
+      // part of a blob large enough to actually get painted (see
+      // isGroundAt's own comment in renderTerrainPatch), producing a
+      // landmark that visibly floats on open water.
+      if (!terrain.isGroundAt(cell.x, cell.y)) return;
       candidates.push({ i, cell, dist: Math.hypot(cell.x - centerX, cell.y - centerY) });
     });
     let landmark = null;
