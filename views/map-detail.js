@@ -217,16 +217,12 @@ function renderTerrainPatch(ctx, canvas, opts) {
   // map-overworld.js uses and for the same reason: smoothing every band
   // fill measured as a real, avoidable cost at Continent-tier cell counts,
   // and the interior band edges weren't what read as jagged in the first
-  // place. Decimated to a fixed point budget before smoothing -- see
-  // map-overworld.js's own smoothLoops for why (point count, not iteration
-  // count, turned out to be the actual cost).
+  // place. Now a thin wrapper over lib/terrain-grid.js's shared
+  // smoothFillLoops (promoted from this exact closure so
+  // views/map-dungeon.js's organic floor-plan rendering can reuse the same
+  // tuned decimate-then-Chaikin logic instead of a second copy).
   function smoothLoops(loops, iterations) {
-    const capacity = 600;
-    return loops.map((loop) => {
-      const stride = Math.max(1, Math.floor(loop.length / capacity));
-      const decimated = stride > 1 ? loop.filter((_, i) => i % stride === 0) : loop;
-      return chaikinSmoothClosed(decimated, iterations);
-    });
+    return smoothFillLoops(loops, iterations);
   }
   function fillLoopsEvenOdd(loops, fillStyle) {
     if (loops.length === 0) return;

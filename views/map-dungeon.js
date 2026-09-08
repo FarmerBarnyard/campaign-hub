@@ -75,9 +75,11 @@ function wireMapExportSave(container, canvas, prefix, renderAtScale) {
 // instead of a second, potentially-drifting copy. Loaded as a global script
 // like everything else here, so every call site below is unchanged.
 
-// Small legend card documenting the door/secret-door/trap symbols -- v1 is
-// numbers-only for rooms themselves (no auto-generated room content), so
-// the legend explains the map's iconography rather than listing contents.
+// Small legend card documenting the door/secret-door/trap symbols. Room
+// purpose/flavor content lives in the .dungeon-key DOM panel below the
+// canvas (see assignDungeonRoomContent in lib/dungeon-lore.js) rather than
+// here -- this card stays focused on iconography, there's no room to list
+// up to ~20 room entries in a fixed-size on-canvas box.
 function drawDungeonLegend(ctx, canvas, palette) {
   const padding = 10, rowH = 15, swatchSize = 11;
   const boxWidth = 150;
@@ -119,8 +121,8 @@ function drawDungeonLegend(ctx, canvas, palette) {
   rowY += rowH + 6;
   ctx.font = '9px sans-serif';
   ctx.fillStyle = '#444444';
-  ctx.fillText('Rooms numbered -- key', boxX + padding, rowY);
-  ctx.fillText('your own notes to them.', boxX + padding, rowY + 11);
+  ctx.fillText('Rooms numbered -- see', boxX + padding, rowY);
+  ctx.fillText('room key below the map.', boxX + padding, rowY + 11);
   ctx.restore();
 }
 
@@ -149,6 +151,7 @@ function renderDungeonMap(container) {
       </div>
       <canvas id="dg-canvas" width="900" height="600"></canvas>
     </div>
+    <div class="dungeon-key" id="dg-key"></div>
   `;
 
   populateCampaignSelect(container.querySelector('#dg-campaign'));
@@ -185,6 +188,12 @@ function renderDungeonMap(container) {
     const doorRng = mulberry32(seed + 88888);
     const trapRng = mulberry32(seed + 13131);
     const setpieceRng = mulberry32(seed + 24680);
+    // Content (purpose/flavor text) and prop placement each get their own
+    // stream too, same isolation convention -- assigning room content or
+    // scattering props must never perturb the layout/shape/door/trap rolls
+    // above, or each other.
+    const contentRng = mulberry32(seed + 36912);
+    const propRng = mulberry32(seed + 75318);
     const legendOn = container.querySelector('#dg-legend').checked;
     const cell = Math.min(canvas.width / gw, canvas.height / gh);
 
@@ -288,28 +297,78 @@ function renderDungeonMap(container) {
       }
     });
 
+    // Purpose label + flavor line per room, drawn without replacement from
+    // a flat pool until exhausted then reshuffled -- see lib/dungeon-lore.js.
+    // Rendered below in the .dungeon-key DOM panel, not on-canvas (no room
+    // for ~20 room entries in the fixed-size legend card).
+    assignDungeonRoomContent(rooms, contentRng);
+
     ctx.fillStyle = palette.rock;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    for (let y = 0; y < gh; y++) {
-      for (let x = 0; x < gw; x++) {
-        if (grid[y][x] === 1) ctx.fillStyle = palette.room;
-        else if (grid[y][x] === 2) ctx.fillStyle = palette.corridor;
-        else continue;
-        ctx.fillRect(x * cell, y * cell, cell, cell);
+
+    // Organic floor-plan rendering: grid[y][x] (0=rock/1=room/2=corridor)
+    // is exactly the regular grid lib/terrain-grid.js's extractFillableRegions
+    // already expects (cols=gw, rows=gh, cellW=cellH=cell) -- Chaikin-smooth
+    // the resulting contours instead of filling literal per-cell squares,
+    // which is what read as a CAD floor plan. Two passes, not one merged
+    // fill: rooms are a strict subset of the floor, so painting the room
+    // contour over an already-smoothed corridor base can never create a
+    // seam/gap at a doorway (it just reads as a smooth-cornered shape
+    // sitting inside the corridor color) -- independently smoothing room
+    // and corridor contours to match at their shared boundary would risk
+    // exactly that seam. Pure rendering change: the BSP algorithm and
+    // connectivity guarantee above are completely untouched.
+    const minLoopArea = cell * cell * 0.5;
+    const floorLoops = smoothFillLoops(extractFillableRegions(gw, gh, cell, cell,
+      (i) => (grid[Math.floor(i / gw)][i % gw] !== 0 ? 1 : 0), 0.5, canvas.width, canvas.height, minLoopArea), 2);
+    const roomLoops = smoothFillLoops(extractFillableRegions(gw, gh, cell, cell,
+      (i) => (grid[Math.floor(i / gw)][i % gw] === 1 ? 1 : 0), 0.5, canvas.width, canvas.height, minLoopArea), 2);
+    function pathFromDungeonLoops(loops) {
+      ctx.beginPath();
+      for (const loop of loops) {
+        if (loop.length === 0) continue;
+        ctx.moveTo(loop[0].x, loop[0].y);
+        for (let i = 1; i < loop.length; i++) ctx.lineTo(loop[i].x, loop[i].y);
+        ctx.closePath();
       }
     }
-    ctx.strokeStyle = palette.stroke;
-    ctx.lineWidth = 1;
-    for (let y = 0; y < gh; y++) {
-      for (let x = 0; x < gw; x++) {
-        if (grid[y][x] === 0) continue;
+    function fillDungeonLoops(loops, fillStyle) {
+      if (loops.length === 0) return;
+      ctx.fillStyle = fillStyle;
+      pathFromDungeonLoops(loops);
+      ctx.fill('evenodd');
+    }
+    fillDungeonLoops(floorLoops, palette.corridor);
+    fillDungeonLoops(roomLoops, palette.room);
+
+    // Outline: a themed double-stroke ink wash (wide low-alpha + thin
+    // crisp, same technique map-detail.js's coastline uses) reads as
+    // hand-inked for "wobble" themes; grim/modern themes keep a single
+    // crisp line. Per-point jitter (the old wobbleStrokeRect treatment)
+    // doesn't apply cleanly to an already-smoothed contour, so wobbleRng
+    // instead varies each loop's wash width/alpha slightly for organic
+    // variation loop-to-loop.
+    ctx.lineJoin = 'round';
+    function strokeDungeonLoops(loops) {
+      for (const loop of loops) {
+        if (loop.length === 0) continue;
+        ctx.beginPath();
+        ctx.moveTo(loop[0].x, loop[0].y);
+        for (let i = 1; i < loop.length; i++) ctx.lineTo(loop[i].x, loop[i].y);
+        ctx.closePath();
+        ctx.strokeStyle = palette.stroke;
         if (palette.wobble) {
-          wobbleStrokeRect(ctx, x * cell, y * cell, cell, cell, wobbleRng, Math.max(1, cell * 0.08));
-        } else {
-          ctx.strokeRect(x * cell, y * cell, cell, cell);
+          ctx.globalAlpha = 0.3 + wobbleRng() * 0.15;
+          ctx.lineWidth = cell * (0.16 + wobbleRng() * 0.08);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
         }
+        ctx.lineWidth = 1;
+        ctx.stroke();
       }
     }
+    strokeDungeonLoops(floorLoops);
+    strokeDungeonLoops(roomLoops);
 
     // Light rubble/debris texture inside rooms (not corridors) -- a sparse
     // scatter of small dots, gated by probability so it reads as clutter
@@ -332,9 +391,15 @@ function renderDungeonMap(container) {
       }
     }
 
-    // Room numbers -- v1 is numbers-only (no auto-generated room content);
-    // a legend/key note is the on-canvas legend below, actual descriptions
-    // are left to the player's own linked notes.
+    // Prop glyphs: a sparser, coarser, per-room pass (not per-cell like
+    // debris above) -- crates/barrels/bones/etc., lightly correlated with
+    // each room's purpose (see lib/dungeon-props.js). Additive on top of
+    // the debris scatter, own rng stream, so it never perturbs debris
+    // placement or the layout.
+    scatterDungeonProps(ctx, grid, gw, gh, rooms, cell, propRng, palette);
+
+    // Room numbers -- content (purpose/flavor) lives in the .dungeon-key
+    // DOM panel below the map, keyed by this same number.
     ctx.font = '9px sans-serif';
     ctx.fillStyle = palette.door;
     ctx.textAlign = 'center';
@@ -385,6 +450,17 @@ function renderDungeonMap(container) {
     }
 
     if (legendOn) drawDungeonLegend(ctx, canvas, palette);
+
+    // Room key: plain DOM text below the canvas, not part of the PNG export
+    // (matches every other generator's "canvas is the export unit"
+    // convention -- see views/map-landmark.js's .landmark-lore). Regenerated
+    // every call so a theme switch never leaves stale entries, even though
+    // theme switches don't actually change room content.
+    const keyEl = container.querySelector('#dg-key');
+    const sortedRooms = rooms.slice().sort((a, b) => a.number - b.number);
+    keyEl.innerHTML = `<h3>Room key</h3>` + sortedRooms.map((r) =>
+      `<p class="key-room"><span class="key-room-num">${r.number}</span> <strong>${r.purpose}</strong><br>${r.flavor}</p>`
+    ).join('');
   }
 
   generate();

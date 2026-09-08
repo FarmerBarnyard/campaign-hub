@@ -176,7 +176,7 @@ canvas { background: #000; border: 1px solid var(--border); border-radius: 4px; 
 /* GM reference text for a landmark site (views/map-landmark.js) -- plain
    prose below the map, not squeezed into the 220px .map-controls column,
    since it reads far better at full width. */
-.landmark-lore {
+.landmark-lore, .dungeon-key, .settlement-poi-panel {
   max-width: 720px;
   margin-top: 20px;
   padding: 16px 20px;
@@ -184,19 +184,32 @@ canvas { background: #000; border: 1px solid var(--border); border-radius: 4px; 
   border: 1px solid var(--border);
   border-radius: 6px;
 }
-.landmark-lore h3 { margin: 0 0 10px; font-size: 1.1rem; }
-.landmark-lore p { margin: 6px 0; line-height: 1.5; }
+.landmark-lore h3, .dungeon-key h3, .settlement-poi-panel h3 { margin: 0 0 10px; font-size: 1.1rem; }
+.landmark-lore p, .dungeon-key p, .settlement-poi-panel p { margin: 6px 0; line-height: 1.5; }
 .landmark-lore .lore-readaloud { font-style: italic; color: var(--text-dim); }
 .landmark-lore .lore-label { margin: 12px 0 2px; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent-bright); }
 .landmark-lore ul { margin: 4px 0; padding-left: 20px; }
 .landmark-lore li { margin: 2px 0; line-height: 1.4; }
+
+/* Dungeon room key (views/map-dungeon.js) -- one entry per numbered room,
+   same panel treatment as .landmark-lore above. */
+.dungeon-key .key-room { border-top: 1px solid var(--border); padding-top: 6px; }
+.dungeon-key .key-room:first-of-type { border-top: none; padding-top: 0; }
+.dungeon-key .key-room-num {
+  display: inline-block; min-width: 1.4em; text-align: center;
+  color: var(--accent-bright); font-family: var(--mono); font-size: 0.85rem;
+}
+
+/* Settlement notable-locations panel (views/map-settlement.js) -- empty and
+   collapses to nothing (via :empty) when a town has no eligible POIs. */
+.settlement-poi-panel:empty { display: none; margin-top: 0; padding: 0; border: none; }
 
 /* Direct in-browser printing (e.g. of a print-tile grid render, see
    map-overworld.js's tile export) -- secondary to the zip-of-PNGs delivery
    path, but the map itself should still print cleanly if the user just
    hits print on the page. */
 @media print {
-  .app-header, .map-controls, .landmark-lore { display: none; }
+  .app-header, .map-controls, .landmark-lore, .dungeon-key, .settlement-poi-panel { display: none; }
   main:has(.map-layout) { max-width: none; }
   .map-layout { display: block; }
   canvas { max-width: 100%; width: 100%; height: auto; border: none; }

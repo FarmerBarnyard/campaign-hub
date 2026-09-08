@@ -2248,6 +2248,12 @@ function renderOverworldMap(container) {
   const DETAIL_GUIDE_W = 64;
   const DETAIL_GUIDE_H = 48;
   const DETAIL_ZOOM_FACTOR = 3;
+  // A settlement's terrain backdrop deliberately shows a WIDER real-world
+  // window than an ordinary detail-map click frames -- roads/fields/hills
+  // beyond the town's own walls should read as surrounding context rather
+  // than being consumed almost entirely by the town's own footprint (see
+  // buildSettlementMapUrl below).
+  const SETTLEMENT_ZOOM_FACTOR = 2;
   function sampleHeightGuide(world, gx, gy, gridW, gridH, windowCellsX, windowCellsY) {
     const { cols, rows, heights } = world;
     const bytes = new Uint8Array(gridW * gridH);
@@ -2323,6 +2329,30 @@ function renderOverworldMap(container) {
       (zone ? `&zone=${zone.key}` : '') +
       `&poi=${poiKey}&poiLabel=${encodeURIComponent(poiLabel)}&poiName=${encodeURIComponent(poiName)}`;
   }
+  // Settlement click target: threads real backdrop-terrain params through
+  // to views/map-settlement.js's own renderTerrainPatch call, the same way
+  // buildLandmarkMapUrl already does for landmarks -- addresses "no
+  // surrounding context." Uses a WIDER window (SETTLEMENT_ZOOM_FACTOR, from
+  // views/map-settlement.js) than an ordinary detail-map click, so roads/
+  // fields/hills beyond the town's own walls are visible in the backdrop
+  // rather than being consumed almost entirely by the town's own footprint.
+  // `coastal` is derived from this same closure's own already-computed
+  // regionCategory/regionOf (the same value backing the
+  // coastalSettlementFraction stat) -- the settlement generator itself has
+  // no notion of "is this town coastal," so it has to be threaded in.
+  // Shared by the live click handler below and the "Export all maps" batch
+  // loop so both stay in sync.
+  function buildSettlementMapUrl(s, i) {
+    const { cols, rows, cellW, cellH, regionOf, regionCategory } = worldCache;
+    const gx = Math.min(cols - 1, Math.max(0, Math.floor(s.x / cellW)));
+    const gy = Math.min(rows - 1, Math.max(0, Math.floor(s.y / cellH)));
+    const windowCellsX = (canvas.width / SETTLEMENT_ZOOM_FACTOR) / cellW;
+    const windowCellsY = (canvas.height / SETTLEMENT_ZOOM_FACTOR) / cellH;
+    const coastal = regionCategory[regionOf[s.index]] === 'coastal' ? 1 : 0;
+    return `#/map/settlement?seed=${currentSeed}&idx=${i}&name=${encodeURIComponent(s.name)}&tier=${s.tier}` +
+      buildGuideParams(s.x, s.y, gx, gy, windowCellsX, windowCellsY) +
+      `&coastal=${coastal}`;
+  }
   canvas.addEventListener('mousemove', (evt) => {
     canvas.style.cursor = (hitTestSettlement(evt) || hitTestLandmark(evt) || hitTestLand(evt)) ? 'pointer' : 'default';
   });
@@ -2335,8 +2365,7 @@ function renderOverworldMap(container) {
       btn.type = 'button';
       btn.textContent = `Generate town map for ${hit.settlement.name} →`;
       btn.addEventListener('click', () => {
-        const url = `#/map/settlement?seed=${currentSeed}&idx=${hit.idx}&name=${encodeURIComponent(hit.settlement.name)}&tier=${hit.settlement.tier}`;
-        location.hash = url;
+        location.hash = buildSettlementMapUrl(hit.settlement, hit.idx);
       });
       actionEl.appendChild(btn);
       return;
@@ -2514,7 +2543,8 @@ function renderOverworldMap(container) {
         const s = settlements[i];
         statusEl.textContent = `Rendering settlement ${i + 1}/${settlements.length}: ${s.name}...`;
         await yieldToPaint();
-        const params = new URLSearchParams({ seed: String(currentSeed), idx: String(i), name: s.name, tier: s.tier });
+        const url = buildSettlementMapUrl(s, i);
+        const params = new URLSearchParams(url.split('?')[1]);
         const tempContainer = document.createElement('div');
         renderSettlementMap(tempContainer, params);
         const data = await canvasToPngBytes(tempContainer.querySelector('canvas'));
