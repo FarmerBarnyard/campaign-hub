@@ -2117,20 +2117,42 @@ function renderOverworldMap(container) {
   // 4:3 to match the detail canvas's own aspect ratio. ZOOM_FACTOR=3 means
   // the detail canvas shows a window 1/3 the width/height of the overworld
   // canvas, in overworld pixels -- i.e. it's a 3x zoom-in, not a full-map
-  // shrink. Starting values, tuned visually against real seeds.
-  const DETAIL_GUIDE_W = 32;
-  const DETAIL_GUIDE_H = 24;
+  // shrink. Resolution confirmed against real output, not assumed: at
+  // Standard tier the window spans roughly 77x58 real parent cells, so the
+  // original 32x24 grid was sampling barely one point per ~2.4 real cells
+  // -- coarse enough that a real, jagged coastline curve washed out into a
+  // smoothed bilinear approximation, and the still-present fine noise on
+  // the detail side filled the gap with invented (not real) wiggle. 64x48
+  // brings sampling down to roughly one point per real cell, so the
+  // coastline the detail map draws is the actual one, not an interpolation
+  // of it.
+  const DETAIL_GUIDE_W = 64;
+  const DETAIL_GUIDE_H = 48;
   const DETAIL_ZOOM_FACTOR = 3;
   function sampleHeightGuide(world, gx, gy, gridW, gridH, windowCellsX, windowCellsY) {
     const { cols, rows, heights } = world;
     const bytes = new Uint8Array(gridW * gridH);
+    // Bilinear (not nearest-cell) so a guide sample landing between two real
+    // cells doesn't just snap to whichever one is closer -- consistent with
+    // how sampleGuide interpolates this same grid back out on the detail
+    // side, so no extra staircasing is introduced on either end of the trip.
+    function sampleRealHeight(cx, cy) {
+      const x0 = Math.max(0, Math.min(cols - 1, Math.floor(cx)));
+      const y0 = Math.max(0, Math.min(rows - 1, Math.floor(cy)));
+      const x1 = Math.min(cols - 1, x0 + 1), y1 = Math.min(rows - 1, y0 + 1);
+      const tx = Math.max(0, Math.min(1, cx - x0)), ty = Math.max(0, Math.min(1, cy - y0));
+      const g = (x, y) => heights[y * cols + x];
+      const top = g(x0, y0) * (1 - tx) + g(x1, y0) * tx;
+      const bot = g(x0, y1) * (1 - tx) + g(x1, y1) * tx;
+      return top * (1 - ty) + bot * ty;
+    }
     for (let sy = 0; sy < gridH; sy++) {
       const fy = (sy + 0.5) / gridH - 0.5; // -0.5..0.5 across the window
       for (let sx = 0; sx < gridW; sx++) {
         const fx = (sx + 0.5) / gridW - 0.5;
-        const cx = Math.min(cols - 1, Math.max(0, Math.round(gx + fx * windowCellsX)));
-        const cy = Math.min(rows - 1, Math.max(0, Math.round(gy + fy * windowCellsY)));
-        bytes[sy * gridW + sx] = Math.max(0, Math.min(255, Math.round(heights[cy * cols + cx] * 255)));
+        const cx = Math.max(0, Math.min(cols - 1, gx + fx * windowCellsX));
+        const cy = Math.max(0, Math.min(rows - 1, gy + fy * windowCellsY));
+        bytes[sy * gridW + sx] = Math.max(0, Math.min(255, Math.round(sampleRealHeight(cx, cy) * 255)));
       }
     }
     return bytes;

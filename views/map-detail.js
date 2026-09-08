@@ -288,7 +288,7 @@ function renderDetailMap(container, params) {
       // parent-map geography); rawH is demoted from "the whole shape" to a
       // smaller-amplitude perturbation layered on top -- the fine detail
       // that wasn't visible at the parent's coarser resolution.
-      const detailAmp = 0.3; // starting point, tuned visually
+      const detailAmp = 0.2; // starting point, tuned visually -- now that the guide grid itself carries real per-cell resolution (64x48), it deserves more say over the fine noise than before
       mesh.cells.forEach((cell, i) => {
         const guideH = sampleGuide(cell.x / canvas.width, cell.y / canvas.height);
         heights[i] = Math.max(0, Math.min(1, guideH + (rawH[i] - meanRaw) * detailAmp));
