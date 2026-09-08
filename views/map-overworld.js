@@ -801,6 +801,9 @@ function renderOverworldMap(container) {
         <button id="ow-save">Save to campaign</button>
         <p id="ow-status" class="status-text"></p>
         <hr>
+        <button id="ow-export-all">Export all maps (.zip)</button>
+        <p id="ow-export-all-status" class="status-text"></p>
+        <hr>
         <p id="ow-settlement-action" class="status-text"></p>
         <p id="ow-theme-suggestion" class="status-text"></p>
       </div>
@@ -2378,5 +2381,95 @@ function renderOverworldMap(container) {
     ctx = offCtx;
     generate(false);
     ctx = prevCtx;
+  });
+
+  // "Export all maps": every POI on the current map (every settlement's town
+  // map, every wild-zone landmark's detail map) plus the overworld itself,
+  // bundled into one downloadable zip -- rendered by calling the SAME
+  // renderSettlementMap/renderDetailMap functions app.js's router calls, just
+  // against a detached, never-inserted container with synthetic params
+  // matching exactly what a real click builds (see the settlement/landmark
+  // click handlers above). Reuses the existing generators as-is rather than
+  // a second, parallel rendering path that could drift from what clicking
+  // through actually produces. Canvas drawing doesn't need layout/attachment
+  // to the live DOM, so the container is never appended anywhere.
+  function sanitizeZipEntryName(name) {
+    return (name || 'unnamed').replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'unnamed';
+  }
+  function canvasToPngBytes(sourceCanvas) {
+    return new Promise((resolve, reject) => {
+      sourceCanvas.toBlob((blob) => {
+        if (!blob) { reject(new Error('canvas export failed')); return; }
+        blob.arrayBuffer().then((buf) => resolve(new Uint8Array(buf)));
+      }, 'image/png');
+    });
+  }
+  // A yield between each POI's render -- generate() for a detail/settlement
+  // map is synchronous and can take real time (erosion, contour extraction);
+  // without ceding a tick, the whole batch runs as one uninterrupted block
+  // and the status text below never actually paints until it's all done.
+  function yieldToPaint() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  container.querySelector('#ow-export-all').addEventListener('click', async () => {
+    const statusEl = container.querySelector('#ow-export-all-status');
+    const exportBtn = container.querySelector('#ow-export-all');
+    if (!worldCache) { statusEl.textContent = 'Generate a map first.'; return; }
+    exportBtn.disabled = true;
+    try {
+      const files = [];
+      statusEl.textContent = 'Rendering overworld map...';
+      await yieldToPaint();
+      files.push({ name: 'overworld.png', data: await canvasToPngBytes(canvas) });
+
+      const settlements = currentSettlements || [];
+      for (let i = 0; i < settlements.length; i++) {
+        const s = settlements[i];
+        statusEl.textContent = `Rendering settlement ${i + 1}/${settlements.length}: ${s.name}...`;
+        await yieldToPaint();
+        const params = new URLSearchParams({ seed: String(currentSeed), idx: String(i), name: s.name, tier: s.tier });
+        const tempContainer = document.createElement('div');
+        renderSettlementMap(tempContainer, params);
+        const data = await canvasToPngBytes(tempContainer.querySelector('canvas'));
+        files.push({ name: `settlements/${sanitizeZipEntryName(s.name)}.png`, data });
+      }
+
+      // worldCache.landmarks is populated regardless of the Wild zones
+      // checkbox (that gate is PAINT-time only, same reason the checkbox
+      // doesn't force a different cached world) -- gated here too, matching
+      // hitTestLandmark's own gate, so exporting doesn't surface landmarks
+      // the user can't currently see or click on this map.
+      const landmarks = container.querySelector('#ow-wildzones').checked ? (worldCache.landmarks || []) : [];
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i];
+        statusEl.textContent = `Rendering landmark ${i + 1}/${landmarks.length}: ${lm.name}...`;
+        await yieldToPaint();
+        const { cols, rows, cellW, cellH, refBiomeOf } = worldCache;
+        const gx = Math.min(cols - 1, Math.max(0, Math.floor(lm.x / cellW)));
+        const gy = Math.min(rows - 1, Math.max(0, Math.floor(lm.y / cellH)));
+        const idx = gy * cols + gx;
+        const extra = `&poi=${lm.key}&poiLabel=${encodeURIComponent(lm.label)}&poiName=${encodeURIComponent(lm.name)}`;
+        const url = buildDetailMapUrl(lm.x, lm.y, gx, gy, refBiomeOf[idx], zoneAtCell(idx), extra);
+        const params = new URLSearchParams(url.split('?')[1]);
+        const tempContainer = document.createElement('div');
+        renderDetailMap(tempContainer, params);
+        const data = await canvasToPngBytes(tempContainer.querySelector('canvas'));
+        files.push({ name: `landmarks/${sanitizeZipEntryName(lm.name)}.png`, data });
+      }
+
+      statusEl.textContent = 'Building zip...';
+      await yieldToPaint();
+      const blob = createZipBlob(files);
+      const a = document.createElement('a');
+      a.download = `campaign-hub-maps-seed-${currentSeed}.zip`;
+      a.href = URL.createObjectURL(blob);
+      a.click();
+      URL.revokeObjectURL(a.href);
+      statusEl.textContent = `Done -- ${files.length} maps exported.`;
+    } catch (err) {
+      statusEl.textContent = `Export failed: ${err && err.message ? err.message : 'unknown error'}.`;
+    } finally {
+      exportBtn.disabled = false;
+    }
   });
 }
