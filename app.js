@@ -6,6 +6,7 @@ const routes = {
   'map/overworld': renderOverworldMap,
   'map/settlement': renderSettlementMap,
   'map/detail': renderDetailMap,
+  'map/landmark': renderLandmarkMap,
 };
 
 function parseHash() {

@@ -38,18 +38,18 @@ const DETAIL_NOISE_FREQ = 8;
 // lib/settlement-names.js's own BIOME_TO_NAME_CATEGORY so a landmark's
 // flavor always matches the region it's placed in, the same direct
 // (non-randomized) mapping that already drives settlement name phonemes.
+// Wild-zone point landmarks (Ley Line Nexus/Astral Scar/Giant's Garden/
+// Sunken Ruins) no longer route through here at all -- clicking one of
+// those on the overworld goes straight to views/map-landmark.js's own
+// dedicated, structured site generator instead (see map-overworld.js's
+// hitTestLandmark/buildLandmarkMapUrl). This table is purely the generic
+// decorative landmark every plain empty-terrain click still rolls.
 const LANDMARK_TYPES = {
   forest: [{ key: 'shrine', label: 'Shrine' }, { key: 'ruins', label: 'Ruins' }],
   mountain: [{ key: 'watchtower', label: 'Watchtower' }, { key: 'ruins', label: 'Ruins' }],
   coastal: [{ key: 'wreck', label: 'Wreck' }, { key: 'ruins', label: 'Ruins' }],
   plains: [{ key: 'ruins', label: 'Ruins' }, { key: 'camp', label: 'Camp' }],
 };
-
-// Keys that come from the overworld's own POINT_LANDMARK_TYPES table (see
-// lib/map-biome-zones.js) rather than LANDMARK_TYPES above -- when a detail
-// map is opened from clicking one of these on the parent map, its icon is
-// drawn via map-overworld.js's drawWildZoneIcon instead of drawLandmarkIcon.
-const OVERWORLD_POI_ICON_KEYS = new Set(['leyLineNexus', 'astralScar', 'giantsGarden', 'sunkenRuins']);
 
 // Simple canvas-path glyphs (no image assets), in the same spirit as
 // drawCornerMedallion/paintRosetteTexture elsewhere in this generator.
@@ -131,6 +131,398 @@ function findZoneByKey(key) {
   return SPECIAL_ZONE_TYPES.find((z) => z.key === key) || RANGE_ZONE_TYPES.find((z) => z.key === key) || null;
 }
 
+// The guide grid (see map-overworld.js's sampleHeightGuide) carries the
+// parent map's REAL local height shape across the route boundary -- the
+// account owner correctly pointed out that h/m/sea alone (a single
+// averaged scalar) only matched statistics, not actual geography: a click
+// near a bay produced an unrelated patch with the right average elevation,
+// not a zoomed-in view of that bay's real curve. Shared by renderDetailMap
+// and views/map-landmark.js's renderLandmarkMap so both consume the exact
+// same guide encoding. Returns null when the URL has no guide (an old/
+// hand-built link, or any other caller that doesn't supply one) -- callers
+// fall back to their own mean-shift-style behavior in that case.
+function parseGuideParam(params) {
+  const guideParam = params.get('guide');
+  const guideCols = parseInt(params.get('gw'), 10) || 0;
+  const guideRows = parseInt(params.get('gh'), 10) || 0;
+  if (!guideParam || guideCols <= 0 || guideRows <= 0) return null;
+  const byteStr = atob(decodeURIComponent(guideParam));
+  const guideBytes = new Uint8Array(byteStr.length);
+  for (let i = 0; i < byteStr.length; i++) guideBytes[i] = byteStr.charCodeAt(i);
+  // Bilinear interpolation over the guideCols x guideRows grid, treated as
+  // covering the same [0,1]x[0,1] space the consuming canvas does -- the
+  // overworld sampled its window to correspond exactly to what that canvas
+  // shows, so no separate offset/scale bookkeeping is needed here.
+  return (u, v) => {
+    const fx = Math.min(guideCols - 1, Math.max(0, u * guideCols - 0.5));
+    const fy = Math.min(guideRows - 1, Math.max(0, v * guideRows - 0.5));
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const x1 = Math.min(guideCols - 1, x0 + 1), y1 = Math.min(guideRows - 1, y0 + 1);
+    const tx = fx - x0, ty = fy - y0;
+    const sampleAt = (x, y) => guideBytes[y * guideCols + x] / 255;
+    const top = sampleAt(x0, y0) * (1 - tx) + sampleAt(x1, y0) * tx;
+    const bot = sampleAt(x0, y1) * (1 - tx) + sampleAt(x1, y1) * tx;
+    return top * (1 - ty) + bot * ty;
+  };
+}
+
+// The terrain-generation pipeline itself (mesh -> height/erosion/hydrology/
+// moisture -> biome band fills/washes -> coastline/river/lake painting),
+// factored out of renderDetailMap's own generate() so views/map-landmark.js
+// can reuse the EXACT same, already-tuned geography machinery for its own
+// backdrop terrain instead of a second copy that could drift out of sync
+// (this pipeline took several rounds of real tuning this session -- guide-
+// grid resolution, noise frequency, smoothing/decimation -- and both
+// callers need to stay on the identical, tested version of it).
+//
+// Deliberately does NOT include: the (optional) generic decorative
+// landmark placement/icon+label (renderDetailMap-specific, since
+// map-landmark.js has its own structured site instead) or the final
+// grain/compass/border decoration (also renderDetailMap-specific --
+// map-landmark.js draws those itself, after its own site inset).
+//
+// `opts`: { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette }.
+// Returns everything either caller needs afterward: the mesh/grid
+// dimensions, the final heights/moisture/biome arrays, hydrology outputs,
+// the elevation-band thresholds, and the raw beach/land contour loops (the
+// caller's own coastline-adjacent drawing, if any, can reuse these rather
+// than re-extracting).
+function renderTerrainPatch(ctx, canvas, opts) {
+  const { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette } = opts;
+
+  const hillsT = Math.max(sea + 0.08, 0.55);
+  const mountainsT = Math.max(hillsT + 0.05, 0.7);
+  const snowT = Math.max(mountainsT + 0.05, 0.85);
+  const forestT = 0.5;
+
+  const meshRng = mulberry32(seed + 71013);
+  const ridgeRng = mulberry32(seed + 81523);
+  const moistureRng = mulberry32(seed + 92131);
+  const erosionRng = mulberry32(seed + 51947);
+  const textureRng = mulberry32(seed + 56273);
+  const washRng = mulberry32(seed + 45871);
+  const heightRng = mulberry32(seed);
+
+  function pathFromLoops(loops) {
+    ctx.beginPath();
+    for (const loop of loops) {
+      ctx.moveTo(loop[0].x, loop[0].y);
+      for (let i = 1; i < loop.length; i++) ctx.lineTo(loop[i].x, loop[i].y);
+      ctx.closePath();
+    }
+  }
+  // Rounds off the raw marching-squares polygon extractFillableRegions
+  // returns -- applied selectively, just to the water/land loops that
+  // define the coastline silhouette, the same targeted approach
+  // map-overworld.js uses and for the same reason: smoothing every band
+  // fill measured as a real, avoidable cost at Continent-tier cell counts,
+  // and the interior band edges weren't what read as jagged in the first
+  // place. Decimated to a fixed point budget before smoothing -- see
+  // map-overworld.js's own smoothLoops for why (point count, not iteration
+  // count, turned out to be the actual cost).
+  function smoothLoops(loops, iterations) {
+    const capacity = 600;
+    return loops.map((loop) => {
+      const stride = Math.max(1, Math.floor(loop.length / capacity));
+      const decimated = stride > 1 ? loop.filter((_, i) => i % stride === 0) : loop;
+      return chaikinSmoothClosed(decimated, iterations);
+    });
+  }
+  function fillLoopsEvenOdd(loops, fillStyle) {
+    if (loops.length === 0) return;
+    ctx.fillStyle = fillStyle;
+    pathFromLoops(loops);
+    ctx.fill('evenodd');
+  }
+  function clipToLoops(loops) {
+    pathFromLoops(loops);
+    ctx.clip('evenodd');
+  }
+
+  const mesh = buildTerrainGrid(meshRng, canvas.width, canvas.height, DETAIL_CELL_COUNT);
+  const { cols, rows, cellW, cellH } = mesh;
+
+  // Height: the same single-range formula as the overworld's Standard
+  // tier (no island mask, no lobes/multi-range -- a click can land
+  // anywhere on the parent landmass, not just at its edge), then a
+  // mean-shift so this patch's AVERAGE elevation matches what the parent
+  // map showed at the clicked spot. Robust regardless of the noise
+  // function's own value distribution; individual cells still vary
+  // locally on top of that shift.
+  const heightSample = makeFbmSampler(heightRng, DETAIL_OCTAVES);
+  const ridgeAngle = ridgeRng() * Math.PI;
+  const ridgedSample = makeAnisotropicSampler(makeRidgedFbmSampler(ridgeRng, Math.min(5, DETAIL_OCTAVES + 1)), ridgeAngle, 1.0, 2.8);
+  const ridgeContribution = (x, y) => ridgedSample(x / canvas.width, y / canvas.height);
+  // When a real guide grid is driving the macro shape below, heightSample/
+  // ridgeContribution need to supply genuinely FINE texture, not another
+  // whole-canvas-scale landform: each one's lowest (and heaviest-weighted)
+  // octave is a single broad lobe/ridge spanning the ENTIRE canvas (see
+  // lib/noise.js's 3x3 base lattice) -- confirmed directly as the actual
+  // cause of a real bug, not a hypothetical one: that lobe, even knocked
+  // down to 30% amplitude by detailAmp below, was still enough to redraw
+  // the coastline somewhere else entirely, since land-vs-water is a hard
+  // threshold right at sea level and this noise was the same characteristic
+  // scale as the guide's own macro shape. Sampling at DETAIL_NOISE_FREQ x
+  // the frequency turns that one giant lobe into that many smaller ripples
+  // -- texture riding on top of the guide's real shape, not a second shape
+  // fighting it for which coastline wins.
+  const detailFreq = sampleGuide ? DETAIL_NOISE_FREQ : 1;
+  const rawH = new Float64Array(mesh.cells.length);
+  mesh.cells.forEach((cell, i) => {
+    const u = (cell.x / canvas.width) * detailFreq, v = (cell.y / canvas.height) * detailFreq;
+    rawH[i] = heightSample(u, v) * 0.5 + ridgeContribution(cell.x * detailFreq, cell.y * detailFreq) * 0.75;
+  });
+  let meanRaw = 0;
+  for (let i = 0; i < rawH.length; i++) meanRaw += rawH[i];
+  meanRaw /= rawH.length;
+  const heights = new Float64Array(rawH.length);
+  if (sampleGuide) {
+    // The guide grid is now the dominant low-frequency shape (the real
+    // parent-map geography); rawH is demoted from "the whole shape" to a
+    // smaller-amplitude perturbation layered on top -- the fine detail
+    // that wasn't visible at the parent's coarser resolution.
+    const detailAmp = 0.2; // starting point, tuned visually -- now that the guide grid itself carries real per-cell resolution (64x48), it deserves more say over the fine noise than before
+    mesh.cells.forEach((cell, i) => {
+      const guideH = sampleGuide(cell.x / canvas.width, cell.y / canvas.height);
+      heights[i] = Math.max(0, Math.min(1, guideH + (rawH[i] - meanRaw) * detailAmp));
+    });
+  } else {
+    const shift = targetAvgHeight - meanRaw;
+    for (let i = 0; i < rawH.length; i++) heights[i] = Math.max(0, Math.min(1, rawH[i] + shift));
+  }
+
+  fillPits(heights, cols, rows, sea);
+  applyHydraulicErosion(heights, cols, rows, erosionRng, {});
+  applyThermalErosion(heights, cols, rows, 3, 0.025, 0.5);
+  fillPits(heights, cols, rows, sea);
+
+  // Hydrology + moisture: mirrors the overworld's own buildWorld pipeline
+  // exactly (computeHydrology -> riverFlowThreshold -> nearRiver bump ->
+  // moisture blend), rivers always on -- this view has no Rivers toggle,
+  // consistent with everything else here being locked.
+  const hydro = computeHydrology(mesh.cells, heights, sea);
+  const { flow, downhill, isLake } = hydro;
+  const landCells = [];
+  for (let i = 0; i < mesh.cells.length; i++) if (heights[i] >= sea) landCells.push(i);
+  const riverThreshold = riverFlowThreshold(flow, landCells, 0.04, 3);
+  const nearRiver = new Float64Array(mesh.cells.length);
+  for (let i = 0; i < mesh.cells.length; i++) {
+    if (flow[i] < riverThreshold && !isLake[i]) continue;
+    nearRiver[i] = Math.max(nearRiver[i], 1);
+    for (const nb of mesh.cells[i].neighbors) nearRiver[nb] = Math.max(nearRiver[nb], 0.5);
+  }
+
+  const moistureSample = makeFbmSampler(moistureRng, Math.max(1, DETAIL_OCTAVES - 1));
+  const mOf = new Float64Array(mesh.cells.length);
+  const refBiomeOf = new Array(mesh.cells.length);
+  mesh.cells.forEach((cell, i) => {
+    let m = moistureSample(cell.x / canvas.width, cell.y / canvas.height) * 0.6 + targetAvgMoisture * 0.4;
+    m = Math.min(1, m + nearRiver[i] * 0.3);
+    mOf[i] = m;
+    refBiomeOf[i] = biomeAt(heights[i], m, sea, 0, 0);
+  });
+
+  // Wild-zone overlay setup, mirroring the overworld's own buildWorld
+  // derivation exactly: wetlowlandOf is a derived flag (only computed
+  // when actually needed, i.e. Bone Marsh/Feywild Bog), and Frostfell
+  // overrides refBiome itself (a forced snow cap) rather than being a
+  // recolor -- applied here, before the render pipeline below, so it
+  // naturally treats this patch as snow-covered.
+  let wetlowlandOf = null;
+  if (zone && zone.baseBiome === 'wetlowland') {
+    const wetlowlandHillsT = Math.max(sea + 0.08, 0.55);
+    const marshMoistureT = 0.62;
+    wetlowlandOf = new Uint8Array(mesh.cells.length);
+    for (let i = 0; i < mesh.cells.length; i++) {
+      const rb = refBiomeOf[i];
+      wetlowlandOf[i] = (rb === 'plains' || rb === 'beach') && heights[i] < wetlowlandHillsT &&
+        (mOf[i] > marshMoistureT || nearRiver[i] > 0) ? 1 : 0;
+    }
+  }
+  if (zone && zone.forcesSnow) {
+    for (let i = 0; i < mesh.cells.length; i++) {
+      if (heights[i] >= sea) refBiomeOf[i] = 'snow';
+    }
+  }
+
+  // Rendering: same ordered pass sequence as the overworld's own
+  // generate() (band fills -> texture scatter -> forest/highland wash +
+  // rosette -> snow -> coastline -> rivers/lakes -> grain/compass/border,
+  // the last of which is the caller's job, not this function's). A
+  // deep-inland patch naturally paints zero water (nothing crosses the sea
+  // threshold); a patch captured near the parent coastline can naturally
+  // dip a few edge cells below `sea` and paint a small shore -- no bespoke
+  // island/coastline logic needed.
+  const minLoopArea = cellW * cellH * 0.5;
+  const heightAt = (i) => heights[i];
+  ctx.fillStyle = palette.biomes.deepwater;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  fillLoopsEvenOdd(
+    smoothLoops(extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea - 0.08, canvas.width, canvas.height, minLoopArea), 2),
+    palette.biomes.shallowwater
+  );
+  // beachLoops/landLoops stay RAW -- reused below for the coastline
+  // emphasis stroke and clipToLoops, neither of which needs a pre-smoothed
+  // copy. Only the fill gets the smoothed version.
+  const beachLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea, canvas.width, canvas.height, minLoopArea);
+  fillLoopsEvenOdd(smoothLoops(beachLoops, 2), palette.biomes.beach);
+  const landLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea + 0.03, canvas.width, canvas.height, minLoopArea);
+  fillLoopsEvenOdd(smoothLoops(landLoops, 2), palette.biomes.plains);
+
+  const spacing = Math.max(16, Math.min(canvas.width, canvas.height) / 24);
+  function biomeAtPoint(x, y) {
+    const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
+    const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
+    return refBiomeOf[gy * cols + gx];
+  }
+  for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
+    for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
+      const px = sx + (textureRng() - 0.5) * spacing * 0.6;
+      const py = sy + (textureRng() - 0.5) * spacing * 0.6;
+      const b = biomeAtPoint(px, py);
+      if (b === 'hills' || b === 'mountains' || b === 'forest') continue;
+      paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink);
+    }
+  }
+
+  const landForestAt = (i) => (heights[i] >= sea + 0.03 ? mOf[i] : -1);
+  const forestLoops = extractFillableRegions(cols, rows, cellW, cellH, landForestAt, forestT, canvas.width, canvas.height, minLoopArea);
+  if (forestLoops.length > 0) {
+    ctx.save();
+    clipToLoops(landLoops.length ? landLoops : beachLoops);
+    for (const group of groupChainsIntoLoops(forestLoops)) {
+      paintWatercolorWash(ctx, group, washRng, palette.wash.forest, palette.ink, 28);
+    }
+    ctx.restore();
+  }
+
+  const highlandLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, hillsT, canvas.width, canvas.height, minLoopArea);
+  for (const group of groupChainsIntoLoops(highlandLoops)) {
+    paintWatercolorWash(ctx, group, washRng, palette.wash.hills, palette.ink, 28);
+  }
+
+  const rosetteRng = mulberry32(seed + 89241);
+  for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
+    for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
+      const px = sx + (textureRng() - 0.5) * spacing * 0.6;
+      const py = sy + (textureRng() - 0.5) * spacing * 0.6;
+      const b = biomeAtPoint(px, py);
+      if (b === 'hills' || b === 'mountains') {
+        paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, b === 'mountains');
+      } else if (b === 'forest') {
+        paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink);
+      }
+    }
+  }
+
+  // Wild-zone overlay: the same "recolor + icon-scatter, additive, on top
+  // of everything already painted" pattern the overworld itself uses --
+  // applied across the WHOLE detail patch rather than gated to one
+  // region, since a click-to-zoom into a specific zone should read as a
+  // close-up of that zone throughout, not just a corner of it. Special
+  // zones (has baseBiome) recolor matching cells; range zones (has
+  // appliesTo instead) recolor an elevation band. Frostfell has no wash
+  // of its own -- it already painted as ordinary snow above via the
+  // forced refBiome override, so it's excluded here.
+  if (zone && !zone.forcesSnow) {
+    const zoneAt = zone.baseBiome
+      ? (i) => {
+          if (zone.baseBiome === 'wetlowland') return wetlowlandOf[i] ? 1 : 0;
+          if (zone.baseBiome === 'any') return heights[i] >= sea ? 1 : 0;
+          return refBiomeOf[i] === zone.baseBiome ? 1 : 0;
+        }
+      : (i) => {
+          if (zone.appliesTo === 'snowOnly') return heights[i] >= snowT ? 1 : 0;
+          if (zone.appliesTo === 'rangeBase') return (heights[i] >= hillsT && heights[i] < mountainsT) ? 1 : 0;
+          return heights[i] >= hillsT ? 1 : 0; // 'range'
+        };
+    function scatterZoneIcons() {
+      for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
+        for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
+          const px = sx + (textureRng() - 0.5) * spacing * 0.6;
+          const py = sy + (textureRng() - 0.5) * spacing * 0.6;
+          const gx = Math.min(cols - 1, Math.max(0, Math.floor(px / cellW)));
+          const gy = Math.min(rows - 1, Math.max(0, Math.floor(py / cellH)));
+          if (!zoneAt(gy * cols + gx)) continue;
+          drawWildZoneIcon(ctx, px, py, zone.iconKey, palette.ink);
+        }
+      }
+    }
+    if (zone.appliesTo === 'snowOnly') {
+      scatterZoneIcons();
+    } else {
+      const zoneLoops = extractFillableRegions(cols, rows, cellW, cellH, zoneAt, 0.5, canvas.width, canvas.height, minLoopArea);
+      if (zoneLoops.length > 0) {
+        for (const group of groupChainsIntoLoops(zoneLoops)) {
+          paintWatercolorWash(ctx, group, washRng, palette.wash[zone.washKey], palette.ink, 24);
+        }
+        scatterZoneIcons();
+      }
+    }
+  }
+
+  fillLoopsEvenOdd(
+    extractFillableRegions(cols, rows, cellW, cellH, heightAt, snowT, canvas.width, canvas.height, minLoopArea),
+    palette.biomes.snow
+  );
+
+  ctx.lineJoin = 'round';
+  for (const chain of beachLoops) {
+    const smoothed = chaikinSmooth(chain, 3);
+    ctx.beginPath();
+    ctx.moveTo(smoothed[0].x, smoothed[0].y);
+    for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
+    ctx.closePath();
+    ctx.strokeStyle = palette.coastline;
+    ctx.globalAlpha = 0.18;
+    ctx.lineWidth = 7;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  const n = mesh.cells.length;
+  const hasUpstream = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (flow[i] >= riverThreshold && downhill[i] !== -1) hasUpstream[downhill[i]] = 1;
+  }
+  const visitedDown = new Uint8Array(n);
+  ctx.strokeStyle = palette.river;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (let s = 0; s < n; s++) {
+    if (flow[s] < riverThreshold || hasUpstream[s]) continue;
+    const chain = [{ x: mesh.cells[s].x, y: mesh.cells[s].y }];
+    let maxFlow = flow[s];
+    let cur = s;
+    for (;;) {
+      const next = downhill[cur];
+      if (next === -1) break;
+      chain.push({ x: mesh.cells[next].x, y: mesh.cells[next].y });
+      maxFlow = Math.max(maxFlow, flow[next]);
+      if (visitedDown[next]) break;
+      visitedDown[next] = 1;
+      if (heights[next] < sea || flow[next] < riverThreshold) break;
+      cur = next;
+    }
+    if (chain.length < 2) continue;
+    const smoothed = chaikinSmooth(chain, 2);
+    ctx.lineWidth = Math.min(6, 1 + Math.sqrt(maxFlow / riverThreshold));
+    ctx.beginPath();
+    ctx.moveTo(smoothed[0].x, smoothed[0].y);
+    for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
+    ctx.stroke();
+  }
+  const lakeVal = (i) => (isLake[i] && flow[i] >= 2 ? 1 : 0);
+  fillLoopsEvenOdd(
+    extractFillableRegions(cols, rows, cellW, cellH, lakeVal, 0.5, canvas.width, canvas.height, minLoopArea),
+    palette.lake
+  );
+
+  return { mesh, cols, rows, cellW, cellH, heights, mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, hillsT, mountainsT, snowT, beachLoops, landLoops, wetlowlandOf };
+}
+
 function renderDetailMap(container, params) {
   const overworldSeed = parseInt(params.get('seed'), 10) || 1;
   const clickX = parseFloat(params.get('x')) || 0;
@@ -149,48 +541,14 @@ function renderDetailMap(container, params) {
   // zone.
   const zone = findZoneByKey(params.get('zone'));
   const locationLabel = zone ? zone.label : biome;
-  // Set when this detail map was opened from a specific, already-named
-  // point-feature wild-zone landmark (Ley Line Nexus, Astral Scar, Giant's
-  // Garden, Sunken Ruins -- see map-overworld.js's hitTestLandmark) rather
-  // than a plain empty-terrain click. Forces that exact landmark into the
-  // landmark slot below instead of rolling a fresh, unrelated one -- the
-  // same "what you clicked is what you get" gap already closed for wild
-  // zones and geography.
-  const poiKey = params.get('poi');
-  const poiLabel = params.get('poiLabel');
-  const poiName = params.get('poiName');
-  // The guide grid (see map-overworld.js's sampleHeightGuide) carries the
-  // parent map's REAL local height shape across the route boundary -- the
-  // account owner correctly pointed out that h/m/sea alone (a single
-  // averaged scalar) only matched statistics, not actual geography: a
-  // click near a bay produced an unrelated patch with the right average
-  // elevation, not a zoomed-in view of that bay's real curve. Guarded so
-  // an old/hand-built link missing these params still renders via the
-  // pre-existing mean-shift fallback below.
-  const guideParam = params.get('guide');
-  const guideCols = parseInt(params.get('gw'), 10) || 0;
-  const guideRows = parseInt(params.get('gh'), 10) || 0;
-  let sampleGuide = null;
-  if (guideParam && guideCols > 0 && guideRows > 0) {
-    const byteStr = atob(decodeURIComponent(guideParam));
-    const guideBytes = new Uint8Array(byteStr.length);
-    for (let i = 0; i < byteStr.length; i++) guideBytes[i] = byteStr.charCodeAt(i);
-    // Bilinear interpolation over the guideCols x guideRows grid, treated
-    // as covering the same [0,1]x[0,1] space this canvas does -- the
-    // overworld sampled its window to correspond exactly to what this
-    // canvas shows, so no separate offset/scale bookkeeping is needed here.
-    sampleGuide = (u, v) => {
-      const fx = Math.min(guideCols - 1, Math.max(0, u * guideCols - 0.5));
-      const fy = Math.min(guideRows - 1, Math.max(0, v * guideRows - 0.5));
-      const x0 = Math.floor(fx), y0 = Math.floor(fy);
-      const x1 = Math.min(guideCols - 1, x0 + 1), y1 = Math.min(guideRows - 1, y0 + 1);
-      const tx = fx - x0, ty = fy - y0;
-      const sampleAt = (x, y) => guideBytes[y * guideCols + x] / 255;
-      const top = sampleAt(x0, y0) * (1 - tx) + sampleAt(x1, y0) * tx;
-      const bot = sampleAt(x0, y1) * (1 - tx) + sampleAt(x1, y1) * tx;
-      return top * (1 - ty) + bot * ty;
-    };
-  }
+  const sampleGuide = parseGuideParam(params);
+  // `tile=1` marks this render as one cell of the overworld's print-tile
+  // grid (see map-overworld.js's buildTileMapUrl) rather than an ordinary
+  // click-to-zoom -- adjacent tiles need to butt together seamlessly, so
+  // the canvas-size-relative grain/compass/border decoration below (which
+  // would otherwise darken/frame every tile's own edges) is skipped for
+  // tile renders.
+  const tileMode = params.get('tile') === '1';
 
   container.innerHTML = `
     <h2 id="dt-heading">Detail map</h2>
@@ -220,171 +578,18 @@ function renderDetailMap(container, params) {
   // map-settlement.js).
   let ctx = canvas.getContext('2d');
 
-  function pathFromLoops(loops) {
-    ctx.beginPath();
-    for (const loop of loops) {
-      ctx.moveTo(loop[0].x, loop[0].y);
-      for (let i = 1; i < loop.length; i++) ctx.lineTo(loop[i].x, loop[i].y);
-      ctx.closePath();
-    }
-  }
-  // Rounds off the raw marching-squares polygon extractFillableRegions
-  // returns -- applied selectively, just to the water/land loops that
-  // define the coastline silhouette (see generate() below), the same
-  // targeted approach map-overworld.js uses and for the same reason:
-  // smoothing every band fill measured as a real, avoidable cost at
-  // Continent-tier cell counts, and the interior band edges weren't what
-  // read as jagged in the first place. Decimated to a fixed point budget
-  // before smoothing -- see map-overworld.js's own smoothLoops for why
-  // (point count, not iteration count, turned out to be the actual cost).
-  function smoothLoops(loops, iterations) {
-    const capacity = 600;
-    return loops.map((loop) => {
-      const stride = Math.max(1, Math.floor(loop.length / capacity));
-      const decimated = stride > 1 ? loop.filter((_, i) => i % stride === 0) : loop;
-      return chaikinSmoothClosed(decimated, iterations);
-    });
-  }
-  function fillLoopsEvenOdd(loops, fillStyle) {
-    if (loops.length === 0) return;
-    ctx.fillStyle = fillStyle;
-    pathFromLoops(loops);
-    ctx.fill('evenodd');
-  }
-  function clipToLoops(loops) {
-    pathFromLoops(loops);
-    ctx.clip('evenodd');
-  }
-
   let lastLandmarkName = null;
 
   function generate() {
     const theme = MAP_THEMES[container.querySelector('#dt-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
     const palette = theme.overworld;
 
-    const hillsT = Math.max(sea + 0.08, 0.55);
-    const mountainsT = Math.max(hillsT + 0.05, 0.7);
-    const snowT = Math.max(mountainsT + 0.05, 0.85);
-    const forestT = 0.5;
-
-    const meshRng = mulberry32(seed + 71013);
-    const ridgeRng = mulberry32(seed + 81523);
-    const moistureRng = mulberry32(seed + 92131);
-    const erosionRng = mulberry32(seed + 51947);
-    const textureRng = mulberry32(seed + 56273);
-    const washRng = mulberry32(seed + 45871);
-    const rosetteRng = mulberry32(seed + 89241);
+    const landmarkRng = mulberry32(seed + 63187);
     const grainRng = mulberry32(seed + 14683);
     const borderRng = mulberry32(seed + 25791);
-    const landmarkRng = mulberry32(seed + 63187);
-    const heightRng = mulberry32(seed);
 
-    const mesh = buildTerrainGrid(meshRng, canvas.width, canvas.height, DETAIL_CELL_COUNT);
-    const { cols, rows, cellW, cellH } = mesh;
-
-    // Height: the same single-range formula as the overworld's Standard
-    // tier (no island mask, no lobes/multi-range -- a click can land
-    // anywhere on the parent landmass, not just at its edge), then a
-    // mean-shift so this patch's AVERAGE elevation matches what the parent
-    // map showed at the clicked spot. Robust regardless of the noise
-    // function's own value distribution; individual cells still vary
-    // locally on top of that shift.
-    const heightSample = makeFbmSampler(heightRng, DETAIL_OCTAVES);
-    const ridgeAngle = ridgeRng() * Math.PI;
-    const ridgedSample = makeAnisotropicSampler(makeRidgedFbmSampler(ridgeRng, Math.min(5, DETAIL_OCTAVES + 1)), ridgeAngle, 1.0, 2.8);
-    const ridgeContribution = (x, y) => ridgedSample(x / canvas.width, y / canvas.height);
-    // When a real guide grid is driving the macro shape below, heightSample/
-    // ridgeContribution need to supply genuinely FINE texture, not another
-    // whole-canvas-scale landform: each one's lowest (and heaviest-weighted)
-    // octave is a single broad lobe/ridge spanning the ENTIRE canvas (see
-    // lib/noise.js's 3x3 base lattice) -- confirmed directly as the actual
-    // cause of a real bug, not a hypothetical one: that lobe, even knocked
-    // down to 30% amplitude by detailAmp below, was still enough to redraw
-    // the coastline somewhere else entirely, since land-vs-water is a hard
-    // threshold right at sea level and this noise was the same characteristic
-    // scale as the guide's own macro shape. Sampling at DETAIL_NOISE_FREQ x
-    // the frequency turns that one giant lobe into that many smaller ripples
-    // -- texture riding on top of the guide's real shape, not a second shape
-    // fighting it for which coastline wins.
-    const detailFreq = sampleGuide ? DETAIL_NOISE_FREQ : 1;
-    const rawH = new Float64Array(mesh.cells.length);
-    mesh.cells.forEach((cell, i) => {
-      const u = (cell.x / canvas.width) * detailFreq, v = (cell.y / canvas.height) * detailFreq;
-      rawH[i] = heightSample(u, v) * 0.5 + ridgeContribution(cell.x * detailFreq, cell.y * detailFreq) * 0.75;
-    });
-    let meanRaw = 0;
-    for (let i = 0; i < rawH.length; i++) meanRaw += rawH[i];
-    meanRaw /= rawH.length;
-    const heights = new Float64Array(rawH.length);
-    if (sampleGuide) {
-      // The guide grid is now the dominant low-frequency shape (the real
-      // parent-map geography); rawH is demoted from "the whole shape" to a
-      // smaller-amplitude perturbation layered on top -- the fine detail
-      // that wasn't visible at the parent's coarser resolution.
-      const detailAmp = 0.2; // starting point, tuned visually -- now that the guide grid itself carries real per-cell resolution (64x48), it deserves more say over the fine noise than before
-      mesh.cells.forEach((cell, i) => {
-        const guideH = sampleGuide(cell.x / canvas.width, cell.y / canvas.height);
-        heights[i] = Math.max(0, Math.min(1, guideH + (rawH[i] - meanRaw) * detailAmp));
-      });
-    } else {
-      const shift = targetAvgHeight - meanRaw;
-      for (let i = 0; i < rawH.length; i++) heights[i] = Math.max(0, Math.min(1, rawH[i] + shift));
-    }
-
-    fillPits(heights, cols, rows, sea);
-    applyHydraulicErosion(heights, cols, rows, erosionRng, {});
-    applyThermalErosion(heights, cols, rows, 3, 0.025, 0.5);
-    fillPits(heights, cols, rows, sea);
-
-    // Hydrology + moisture: mirrors the overworld's own buildWorld pipeline
-    // exactly (computeHydrology -> riverFlowThreshold -> nearRiver bump ->
-    // moisture blend), rivers always on -- this view has no Rivers toggle,
-    // consistent with everything else here being locked.
-    const hydro = computeHydrology(mesh.cells, heights, sea);
-    const { flow, downhill, isLake } = hydro;
-    const landCells = [];
-    for (let i = 0; i < mesh.cells.length; i++) if (heights[i] >= sea) landCells.push(i);
-    const riverThreshold = riverFlowThreshold(flow, landCells, 0.04, 3);
-    const nearRiver = new Float64Array(mesh.cells.length);
-    for (let i = 0; i < mesh.cells.length; i++) {
-      if (flow[i] < riverThreshold && !isLake[i]) continue;
-      nearRiver[i] = Math.max(nearRiver[i], 1);
-      for (const nb of mesh.cells[i].neighbors) nearRiver[nb] = Math.max(nearRiver[nb], 0.5);
-    }
-
-    const moistureSample = makeFbmSampler(moistureRng, Math.max(1, DETAIL_OCTAVES - 1));
-    const mOf = new Float64Array(mesh.cells.length);
-    const refBiomeOf = new Array(mesh.cells.length);
-    mesh.cells.forEach((cell, i) => {
-      let m = moistureSample(cell.x / canvas.width, cell.y / canvas.height) * 0.6 + targetAvgMoisture * 0.4;
-      m = Math.min(1, m + nearRiver[i] * 0.3);
-      mOf[i] = m;
-      refBiomeOf[i] = biomeAt(heights[i], m, sea, 0, 0);
-    });
-
-    // Wild-zone overlay setup, mirroring the overworld's own buildWorld
-    // derivation exactly: wetlowlandOf is a derived flag (only computed
-    // when actually needed, i.e. Bone Marsh/Feywild Bog), and Frostfell
-    // overrides refBiome itself (a forced snow cap) rather than being a
-    // recolor -- applied here, before the landmark candidate filter and
-    // the render pipeline below, so both naturally treat this patch as
-    // snow-covered.
-    let wetlowlandOf = null;
-    if (zone && zone.baseBiome === 'wetlowland') {
-      const wetlowlandHillsT = Math.max(sea + 0.08, 0.55);
-      const marshMoistureT = 0.62;
-      wetlowlandOf = new Uint8Array(mesh.cells.length);
-      for (let i = 0; i < mesh.cells.length; i++) {
-        const rb = refBiomeOf[i];
-        wetlowlandOf[i] = (rb === 'plains' || rb === 'beach') && heights[i] < wetlowlandHillsT &&
-          (mOf[i] > marshMoistureT || nearRiver[i] > 0) ? 1 : 0;
-      }
-    }
-    if (zone && zone.forcesSnow) {
-      for (let i = 0; i < mesh.cells.length; i++) {
-        if (heights[i] >= sea) refBiomeOf[i] = 'snow';
-      }
-    }
+    const terrain = renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette });
+    const { cols, rows, cellW, cellH, heights, refBiomeOf, hillsT, mountainsT, snowT } = terrain;
 
     // Landmark: one candidate biased toward the canvas center, excluded
     // from steep terrain (hills/mountains/snow) and from beach, so it
@@ -393,7 +598,7 @@ function renderDetailMap(container, params) {
     // the literal closest, so it isn't dead-center on every single map.
     const centerX = canvas.width / 2, centerY = canvas.height / 2;
     const candidates = [];
-    mesh.cells.forEach((cell, i) => {
+    terrain.mesh.cells.forEach((cell, i) => {
       if (heights[i] < sea + 0.03) return;
       const b = refBiomeOf[i];
       if (b === 'hills' || b === 'mountains' || b === 'snow') return;
@@ -404,211 +609,16 @@ function renderDetailMap(container, params) {
       candidates.sort((a, b) => a.dist - b.dist);
       const pickFrom = Math.max(1, Math.floor(candidates.length / 3));
       const pick = candidates[Math.floor(landmarkRng() * pickFrom)];
-      let type, name;
-      if (poiKey) {
-        // The account owner clicked this exact landmark on the overworld --
-        // its identity is fixed, not rolled. landmarkRng isn't consumed any
-        // further here (nothing downstream reads it again either way), so
-        // skipping the type/name rolls doesn't desync anything else.
-        type = { key: poiKey, label: poiLabel || poiKey };
-        name = poiName || poiLabel || poiKey;
-      } else {
-        const category = BIOME_TO_NAME_CATEGORY[biome] || 'plains';
-        const types = LANDMARK_TYPES[category] || LANDMARK_TYPES.plains;
-        type = types[Math.floor(landmarkRng() * types.length)];
-        name = `${type.label} of ${generateSettlementName(landmarkRng, 'village', category)}`;
-      }
+      const category = BIOME_TO_NAME_CATEGORY[biome] || 'plains';
+      const types = LANDMARK_TYPES[category] || LANDMARK_TYPES.plains;
+      const type = types[Math.floor(landmarkRng() * types.length)];
+      const name = `${type.label} of ${generateSettlementName(landmarkRng, 'village', category)}`;
       landmark = { x: pick.cell.x, y: pick.cell.y, idx: pick.i, type, name };
     }
     lastLandmarkName = landmark ? landmark.name : null;
 
-    // Rendering: same ordered pass sequence as the overworld's own
-    // generate() (band fills -> texture scatter -> forest/highland wash +
-    // rosette -> snow -> coastline -> rivers/lakes -> landmark -> grain/
-    // compass/border). A deep-inland patch naturally paints zero water
-    // (nothing crosses the sea threshold); a patch captured near the
-    // parent coastline can naturally dip a few edge cells below `sea` and
-    // paint a small shore -- no bespoke island/coastline logic needed.
-    const minLoopArea = cellW * cellH * 0.5;
-    const heightAt = (i) => heights[i];
-    ctx.fillStyle = palette.biomes.deepwater;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    fillLoopsEvenOdd(
-      smoothLoops(extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea - 0.08, canvas.width, canvas.height, minLoopArea), 2),
-      palette.biomes.shallowwater
-    );
-    // beachLoops/landLoops stay RAW -- reused below for the coastline
-    // emphasis stroke and clipToLoops, neither of which needs a pre-smoothed
-    // copy. Only the fill gets the smoothed version.
-    const beachLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea, canvas.width, canvas.height, minLoopArea);
-    fillLoopsEvenOdd(smoothLoops(beachLoops, 2), palette.biomes.beach);
-    const landLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, sea + 0.03, canvas.width, canvas.height, minLoopArea);
-    fillLoopsEvenOdd(smoothLoops(landLoops, 2), palette.biomes.plains);
-
-    const spacing = Math.max(16, Math.min(canvas.width, canvas.height) / 24);
-    function biomeAtPoint(x, y) {
-      const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
-      const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
-      return refBiomeOf[gy * cols + gx];
-    }
-    for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
-      for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
-        const px = sx + (textureRng() - 0.5) * spacing * 0.6;
-        const py = sy + (textureRng() - 0.5) * spacing * 0.6;
-        const b = biomeAtPoint(px, py);
-        if (b === 'hills' || b === 'mountains' || b === 'forest') continue;
-        paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink);
-      }
-    }
-
-    const landForestAt = (i) => (heights[i] >= sea + 0.03 ? mOf[i] : -1);
-    const forestLoops = extractFillableRegions(cols, rows, cellW, cellH, landForestAt, forestT, canvas.width, canvas.height, minLoopArea);
-    if (forestLoops.length > 0) {
-      ctx.save();
-      clipToLoops(landLoops.length ? landLoops : beachLoops);
-      for (const group of groupChainsIntoLoops(forestLoops)) {
-        paintWatercolorWash(ctx, group, washRng, palette.wash.forest, palette.ink, 28);
-      }
-      ctx.restore();
-    }
-
-    const highlandLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, hillsT, canvas.width, canvas.height, minLoopArea);
-    for (const group of groupChainsIntoLoops(highlandLoops)) {
-      paintWatercolorWash(ctx, group, washRng, palette.wash.hills, palette.ink, 28);
-    }
-
-    for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
-      for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
-        const px = sx + (textureRng() - 0.5) * spacing * 0.6;
-        const py = sy + (textureRng() - 0.5) * spacing * 0.6;
-        const b = biomeAtPoint(px, py);
-        if (b === 'hills' || b === 'mountains') {
-          paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, b === 'mountains');
-        } else if (b === 'forest') {
-          paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink);
-        }
-      }
-    }
-
-    // Wild-zone overlay: the same "recolor + icon-scatter, additive, on top
-    // of everything already painted" pattern the overworld itself uses --
-    // applied across the WHOLE detail patch rather than gated to one
-    // region, since a click-to-zoom into a specific zone should read as a
-    // close-up of that zone throughout, not just a corner of it. Special
-    // zones (has baseBiome) recolor matching cells; range zones (has
-    // appliesTo instead) recolor an elevation band. Frostfell has no wash
-    // of its own -- it already painted as ordinary snow above via the
-    // forced refBiome override, so it's excluded here.
-    if (zone && !zone.forcesSnow) {
-      const zoneAt = zone.baseBiome
-        ? (i) => {
-            if (zone.baseBiome === 'wetlowland') return wetlowlandOf[i] ? 1 : 0;
-            if (zone.baseBiome === 'any') return heights[i] >= sea ? 1 : 0;
-            return refBiomeOf[i] === zone.baseBiome ? 1 : 0;
-          }
-        : (i) => {
-            if (zone.appliesTo === 'snowOnly') return heights[i] >= snowT ? 1 : 0;
-            if (zone.appliesTo === 'rangeBase') return (heights[i] >= hillsT && heights[i] < mountainsT) ? 1 : 0;
-            return heights[i] >= hillsT ? 1 : 0; // 'range'
-          };
-      function scatterZoneIcons() {
-        for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
-          for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
-            const px = sx + (textureRng() - 0.5) * spacing * 0.6;
-            const py = sy + (textureRng() - 0.5) * spacing * 0.6;
-            const gx = Math.min(cols - 1, Math.max(0, Math.floor(px / cellW)));
-            const gy = Math.min(rows - 1, Math.max(0, Math.floor(py / cellH)));
-            if (!zoneAt(gy * cols + gx)) continue;
-            drawWildZoneIcon(ctx, px, py, zone.iconKey, palette.ink);
-          }
-        }
-      }
-      if (zone.appliesTo === 'snowOnly') {
-        scatterZoneIcons();
-      } else {
-        const zoneLoops = extractFillableRegions(cols, rows, cellW, cellH, zoneAt, 0.5, canvas.width, canvas.height, minLoopArea);
-        if (zoneLoops.length > 0) {
-          for (const group of groupChainsIntoLoops(zoneLoops)) {
-            paintWatercolorWash(ctx, group, washRng, palette.wash[zone.washKey], palette.ink, 24);
-          }
-          scatterZoneIcons();
-        }
-      }
-    }
-
-    fillLoopsEvenOdd(
-      extractFillableRegions(cols, rows, cellW, cellH, heightAt, snowT, canvas.width, canvas.height, minLoopArea),
-      palette.biomes.snow
-    );
-
-    ctx.lineJoin = 'round';
-    for (const chain of beachLoops) {
-      const smoothed = chaikinSmooth(chain, 3);
-      ctx.beginPath();
-      ctx.moveTo(smoothed[0].x, smoothed[0].y);
-      for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
-      ctx.closePath();
-      ctx.strokeStyle = palette.coastline;
-      ctx.globalAlpha = 0.18;
-      ctx.lineWidth = 7;
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    }
-
-    const n = mesh.cells.length;
-    const hasUpstream = new Uint8Array(n);
-    for (let i = 0; i < n; i++) {
-      if (flow[i] >= riverThreshold && downhill[i] !== -1) hasUpstream[downhill[i]] = 1;
-    }
-    const visitedDown = new Uint8Array(n);
-    ctx.strokeStyle = palette.river;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    for (let s = 0; s < n; s++) {
-      if (flow[s] < riverThreshold || hasUpstream[s]) continue;
-      const chain = [{ x: mesh.cells[s].x, y: mesh.cells[s].y }];
-      let maxFlow = flow[s];
-      let cur = s;
-      for (;;) {
-        const next = downhill[cur];
-        if (next === -1) break;
-        chain.push({ x: mesh.cells[next].x, y: mesh.cells[next].y });
-        maxFlow = Math.max(maxFlow, flow[next]);
-        if (visitedDown[next]) break;
-        visitedDown[next] = 1;
-        if (heights[next] < sea || flow[next] < riverThreshold) break;
-        cur = next;
-      }
-      if (chain.length < 2) continue;
-      const smoothed = chaikinSmooth(chain, 2);
-      ctx.lineWidth = Math.min(6, 1 + Math.sqrt(maxFlow / riverThreshold));
-      ctx.beginPath();
-      ctx.moveTo(smoothed[0].x, smoothed[0].y);
-      for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
-      ctx.stroke();
-    }
-    const lakeVal = (i) => (isLake[i] && flow[i] >= 2 ? 1 : 0);
-    fillLoopsEvenOdd(
-      extractFillableRegions(cols, rows, cellW, cellH, lakeVal, 0.5, canvas.width, canvas.height, minLoopArea),
-      palette.lake
-    );
-
     if (landmark) {
-      // A POI-forced landmark's key comes from POINT_LANDMARK_TYPES (the
-      // overworld's own wild-zone landmark table: leyLineNexus/astralScar/
-      // giantsGarden/sunkenRuins) rather than this file's LANDMARK_TYPES, so
-      // drawLandmarkIcon (which only knows ruins/shrine/watchtower/camp/
-      // wreck) wouldn't draw anything for it. drawWildZoneIcon is the
-      // function map-overworld.js already uses to draw these same icons on
-      // the parent map -- loaded before this file (see index.html's script
-      // order) and reused here rather than re-implementing the glyphs.
-      if (OVERWORLD_POI_ICON_KEYS.has(landmark.type.key)) {
-        drawWildZoneIcon(ctx, landmark.x, landmark.y, landmark.type.key, palette.ink);
-      } else {
-        drawLandmarkIcon(ctx, landmark.x, landmark.y, landmark.type.key, palette.ink);
-      }
+      drawLandmarkIcon(ctx, landmark.x, landmark.y, landmark.type.key, palette.ink);
       ctx.font = `bold 11px ${OW_SERIF}`;
       ctx.fillStyle = labelColorFor(refBiomeOf[landmark.idx], palette);
       ctx.textAlign = 'center';
@@ -616,9 +626,11 @@ function renderDetailMap(container, params) {
       ctx.fillText(landmark.name, landmark.x, landmark.y + 14);
     }
 
-    paintParchmentGrain(ctx, canvas, grainRng, palette.grain);
-    drawCompassRose(ctx, canvas.width - 50, 50, 28, palette.coastline);
-    drawMapVignetteAndBorder(ctx, canvas, palette.coastline, borderRng);
+    if (!tileMode) {
+      paintParchmentGrain(ctx, canvas, grainRng, palette.grain);
+      drawCompassRose(ctx, canvas.width - 50, 50, 28, palette.coastline);
+      drawMapVignetteAndBorder(ctx, canvas, palette.coastline, borderRng);
+    }
   }
 
   generate();

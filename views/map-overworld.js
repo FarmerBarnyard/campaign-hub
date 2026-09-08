@@ -716,6 +716,51 @@ function drawCompassRose(ctx, cx, cy, r, ink) {
   ctx.restore();
 }
 
+// Grid lines + row/col labels over the current canvas, dividing it into
+// `tileCols` x `tileRows` equal rectangles -- used both as a live,
+// paint-time-only preview overlay (#ow-tile-preview) and to build the
+// exported zip's own tile-index.png (see the export-tiles handler below),
+// so a printed sheet's rowR-colC filename always matches what this exact
+// overlay showed before exporting.
+function drawTileGridOverlay(ctx, canvas, palette, tileCols, tileRows) {
+  const tileW = canvas.width / tileCols, tileH = canvas.height / tileRows;
+  ctx.save();
+  ctx.strokeStyle = palette.coastline;
+  ctx.globalAlpha = 0.8;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 4]);
+  for (let c = 1; c < tileCols; c++) {
+    ctx.beginPath();
+    ctx.moveTo(c * tileW, 0);
+    ctx.lineTo(c * tileW, canvas.height);
+    ctx.stroke();
+  }
+  for (let r = 1; r < tileRows; r++) {
+    ctx.beginPath();
+    ctx.moveTo(0, r * tileH);
+    ctx.lineTo(canvas.width, r * tileH);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.font = `bold 11px ${OW_SERIF}`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  for (let r = 0; r < tileRows; r++) {
+    for (let c = 0; c < tileCols; c++) {
+      const label = `R${r + 1}C${c + 1}`;
+      const x = c * tileW + 4, y = r * tileH + 4;
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      const w = ctx.measureText(label).width;
+      ctx.fillRect(x - 2, y - 1, w + 4, 14);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = palette.coastline;
+      ctx.fillText(label, x, y);
+    }
+  }
+  ctx.restore();
+}
+
 function drawSettlementIcon(ctx, tier, cx, cy, r) {
   if (tier === 'village') {
     // A small hut: triangular roof over a low base.
@@ -803,6 +848,12 @@ function renderOverworldMap(container) {
         <hr>
         <button id="ow-export-all">Export all maps (.zip)</button>
         <p id="ow-export-all-status" class="status-text"></p>
+        <hr>
+        <label>Print tile columns <input id="ow-tile-cols" type="number" value="3" min="1" max="8"></label>
+        <label>Print tile rows <input id="ow-tile-rows" type="number" value="3" min="1" max="8"></label>
+        <label><input id="ow-tile-preview" type="checkbox"> Preview tile grid</label>
+        <button id="ow-export-tiles">Export print tiles (.zip)</button>
+        <p id="ow-export-tiles-status" class="status-text"></p>
         <hr>
         <p id="ow-settlement-action" class="status-text"></p>
         <p id="ow-theme-suggestion" class="status-text"></p>
@@ -2011,6 +2062,17 @@ function renderOverworldMap(container) {
     drawCompassRose(ctx, canvas.width - 50, 50, 28, palette.coastline);
     drawMapVignetteAndBorder(ctx, canvas, palette.coastline, borderRng);
 
+    // Print-tile grid preview: paint-time only overlay (like #ow-wildzones'
+    // own icons), drawn last/on top so the grid lines and row/col labels
+    // stay legible over everything already painted -- lets the user check
+    // tile boundaries land somewhere sensible before spending the time to
+    // actually export every tile.
+    if (container.querySelector('#ow-tile-preview').checked) {
+      drawTileGridOverlay(ctx, canvas, palette,
+        parseInt(container.querySelector('#ow-tile-cols').value, 10) || 1,
+        parseInt(container.querySelector('#ow-tile-rows').value, 10) || 1);
+    }
+
     // Suggested campaign theme: a heuristic read of this specific map's own
     // statistics (biome mix, settlement tiers, river count, island-ness),
     // not anything the map's rendering needs -- computed last, purely from
@@ -2214,25 +2276,52 @@ function renderOverworldMap(container) {
     }
     return bytes;
   }
-  // Shared by both the empty-terrain click and the landmark click below --
-  // pulled out so the guide-sampling/URL-building logic (the part that took
-  // several rounds to get right: real geography, not just averaged
-  // statistics) exists in exactly one place rather than as two copies that
-  // could silently drift apart. `extraParams` is an already-built query
-  // string suffix (e.g. `&poi=...`) or ''.
-  function buildDetailMapUrl(x, y, gx, gy, biome, zone, extraParams) {
+  // Shared by the empty-terrain click, the landmark click, and the print-
+  // tile export below -- pulled out so the guide-sampling/URL-building
+  // logic (the part that took several rounds to get right: real geography,
+  // not just averaged statistics) exists in exactly one place rather than
+  // several copies that could silently drift apart. Returns a query-string
+  // FRAGMENT (leading `&`), not a full URL, since every caller still needs
+  // to add its own route/seed/biome/zone/extra params around it.
+  function buildGuideParams(x, y, gx, gy, windowCellsX, windowCellsY) {
     const { avgHeight, avgMoisture } = sampleLocalCharacter(worldCache, gx, gy, 4);
     const seaLevel = parseInt(container.querySelector('#ow-sea').value, 10) / 100;
     const guideW = DETAIL_GUIDE_W, guideH = DETAIL_GUIDE_H;
-    const windowCellsX = (canvas.width / DETAIL_ZOOM_FACTOR) / worldCache.cellW;
-    const windowCellsY = (canvas.height / DETAIL_ZOOM_FACTOR) / worldCache.cellH;
     const guideBytes = sampleHeightGuide(worldCache, gx, gy, guideW, guideH, windowCellsX, windowCellsY);
     const guideB64 = btoa(String.fromCharCode(...guideBytes));
-    return `#/map/detail?seed=${currentSeed}&x=${Math.round(x)}&y=${Math.round(y)}` +
-      `&biome=${biome}&h=${avgHeight.toFixed(3)}&m=${avgMoisture.toFixed(3)}&sea=${seaLevel}` +
+    return `&x=${Math.round(x)}&y=${Math.round(y)}&h=${avgHeight.toFixed(3)}&m=${avgMoisture.toFixed(3)}&sea=${seaLevel}` +
+      `&guide=${encodeURIComponent(guideB64)}&gw=${guideW}&gh=${guideH}&zoom=${DETAIL_ZOOM_FACTOR}`;
+  }
+  // A click-relative window sized to 1/3 of the parent canvas -- the
+  // original click-to-zoom sizing, kept as the default for both ordinary
+  // terrain clicks and landmark clicks. The print-tile exporter below
+  // passes its own tile-footprint-sized window into buildGuideParams
+  // directly instead of using this helper.
+  function clickWindowCells() {
+    return {
+      windowCellsX: (canvas.width / DETAIL_ZOOM_FACTOR) / worldCache.cellW,
+      windowCellsY: (canvas.height / DETAIL_ZOOM_FACTOR) / worldCache.cellH,
+    };
+  }
+  function buildDetailMapUrl(x, y, gx, gy, biome, zone, extraParams) {
+    const { windowCellsX, windowCellsY } = clickWindowCells();
+    return `#/map/detail?seed=${currentSeed}&biome=${biome}` +
+      buildGuideParams(x, y, gx, gy, windowCellsX, windowCellsY) +
       (zone ? `&zone=${zone.key}` : '') +
-      `&guide=${encodeURIComponent(guideB64)}&gw=${guideW}&gh=${guideH}&zoom=${DETAIL_ZOOM_FACTOR}` +
       (extraParams || '');
+  }
+  // Landmark click target: routes to the dedicated structured-site view
+  // (views/map-landmark.js) instead of the generic terrain-zoom path --
+  // settlements already get their own purpose-built generator rather than
+  // routing through generic terrain, and landmarks need the same
+  // treatment (the "reads as a zoomed screenshot with a label" complaint
+  // this replaces).
+  function buildLandmarkMapUrl(x, y, gx, gy, biome, zone, poiKey, poiLabel, poiName) {
+    const { windowCellsX, windowCellsY } = clickWindowCells();
+    return `#/map/landmark?seed=${currentSeed}&biome=${biome}` +
+      buildGuideParams(x, y, gx, gy, windowCellsX, windowCellsY) +
+      (zone ? `&zone=${zone.key}` : '') +
+      `&poi=${poiKey}&poiLabel=${encodeURIComponent(poiLabel)}&poiName=${encodeURIComponent(poiName)}`;
   }
   canvas.addEventListener('mousemove', (evt) => {
     canvas.style.cursor = (hitTestSettlement(evt) || hitTestLandmark(evt) || hitTestLand(evt)) ? 'pointer' : 'default';
@@ -2254,10 +2343,9 @@ function renderOverworldMap(container) {
     }
     // Point-feature wild-zone landmark click: unlike an empty-terrain click,
     // this spot has a specific, already-named feature on it (e.g. "Ley Line
-    // Nexus of Kharzhall") -- threaded through as `poi`/`poiLabel`/`poiName`
-    // so map-detail.js can force that exact landmark into its own landmark
-    // slot instead of rolling a fresh, unrelated one, the same gap fixed
-    // for wild zones themselves earlier.
+    // Nexus of Kharzhall") -- routes to the dedicated structured-site view
+    // (views/map-landmark.js), not the generic terrain-zoom path, carrying
+    // the landmark's identity as `poi`/`poiLabel`/`poiName`.
     const landmarkHit = hitTestLandmark(evt);
     if (landmarkHit) {
       const { cols, rows, cellW, cellH, refBiomeOf } = worldCache;
@@ -2268,10 +2356,9 @@ function renderOverworldMap(container) {
       const zone = zoneAtCell(idx);
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.textContent = `Generate detail map for ${landmarkHit.name} →`;
+      btn.textContent = `Generate site map for ${landmarkHit.name} →`;
       btn.addEventListener('click', () => {
-        const extra = `&poi=${landmarkHit.key}&poiLabel=${encodeURIComponent(landmarkHit.label)}&poiName=${encodeURIComponent(landmarkHit.name)}`;
-        location.hash = buildDetailMapUrl(landmarkHit.x, landmarkHit.y, gx, gy, biome, zone, extra);
+        location.hash = buildLandmarkMapUrl(landmarkHit.x, landmarkHit.y, gx, gy, biome, zone, landmarkHit.key, landmarkHit.label, landmarkHit.name);
       });
       actionEl.appendChild(btn);
       return;
@@ -2448,11 +2535,10 @@ function renderOverworldMap(container) {
         const gx = Math.min(cols - 1, Math.max(0, Math.floor(lm.x / cellW)));
         const gy = Math.min(rows - 1, Math.max(0, Math.floor(lm.y / cellH)));
         const idx = gy * cols + gx;
-        const extra = `&poi=${lm.key}&poiLabel=${encodeURIComponent(lm.label)}&poiName=${encodeURIComponent(lm.name)}`;
-        const url = buildDetailMapUrl(lm.x, lm.y, gx, gy, refBiomeOf[idx], zoneAtCell(idx), extra);
+        const url = buildLandmarkMapUrl(lm.x, lm.y, gx, gy, refBiomeOf[idx], zoneAtCell(idx), lm.key, lm.label, lm.name);
         const params = new URLSearchParams(url.split('?')[1]);
         const tempContainer = document.createElement('div');
-        renderDetailMap(tempContainer, params);
+        renderLandmarkMap(tempContainer, params);
         const data = await canvasToPngBytes(tempContainer.querySelector('canvas'));
         files.push({ name: `landmarks/${sanitizeZipEntryName(lm.name)}.png`, data });
       }
@@ -2466,6 +2552,88 @@ function renderOverworldMap(container) {
       a.click();
       URL.revokeObjectURL(a.href);
       statusEl.textContent = `Done -- ${files.length} maps exported.`;
+    } catch (err) {
+      statusEl.textContent = `Export failed: ${err && err.message ? err.message : 'unknown error'}.`;
+    } finally {
+      exportBtn.disabled = false;
+    }
+  });
+
+  // Grid-aligned print tiles: divides the CURRENT canvas into tileCols x
+  // tileRows equal rectangles and renders each one as its own detail-map-
+  // style sheet at the SAME scale/orientation as its position -- printing
+  // every sheet and arranging them by row/col reconstructs the continent
+  // at higher effective resolution than the single overview PNG alone.
+  // Zero overlap by construction (tileW/tileCols exactly partitions the
+  // canvas); tileMode (`&tile=1`, see map-detail.js) skips the grain/
+  // compass/border decoration so adjacent sheets butt together seamlessly.
+  function buildTileMapUrl(tileCol, tileRow, tileCols, tileRows) {
+    const tileW = canvas.width / tileCols, tileH = canvas.height / tileRows;
+    const cx = (tileCol + 0.5) * tileW, cy = (tileRow + 0.5) * tileH;
+    const { cols, rows, cellW, cellH, refBiomeOf } = worldCache;
+    const gx = Math.min(cols - 1, Math.max(0, Math.floor(cx / cellW)));
+    const gy = Math.min(rows - 1, Math.max(0, Math.floor(cy / cellH)));
+    const idx = gy * cols + gx;
+    const windowCellsX = tileW / cellW, windowCellsY = tileH / cellH;
+    const zone = zoneAtCell(idx);
+    return `#/map/detail?seed=${currentSeed}&biome=${refBiomeOf[idx]}` +
+      buildGuideParams(cx, cy, gx, gy, windowCellsX, windowCellsY) +
+      (zone ? `&zone=${zone.key}` : '') +
+      `&tile=1`;
+  }
+  container.querySelector('#ow-export-tiles').addEventListener('click', async () => {
+    const statusEl = container.querySelector('#ow-export-tiles-status');
+    const exportBtn = container.querySelector('#ow-export-tiles');
+    if (!worldCache) { statusEl.textContent = 'Generate a map first.'; return; }
+    const tileCols = Math.max(1, parseInt(container.querySelector('#ow-tile-cols').value, 10) || 1);
+    const tileRows = Math.max(1, parseInt(container.querySelector('#ow-tile-rows').value, 10) || 1);
+    exportBtn.disabled = true;
+    try {
+      const files = [];
+      statusEl.textContent = 'Rendering tile index...';
+      await yieldToPaint();
+      // A labeled key is required, not optional -- without it there's no
+      // way to know which printed sheet goes where. Redrawn fresh onto its
+      // own offscreen canvas (same ctx-swap idiom wireMapExportSave uses)
+      // with the grid FORCED on, regardless of whether the live preview
+      // checkbox happens to be checked right now.
+      const indexCanvas = document.createElement('canvas');
+      indexCanvas.width = canvas.width;
+      indexCanvas.height = canvas.height;
+      const indexCtx = indexCanvas.getContext('2d');
+      const prevCtx = ctx;
+      ctx = indexCtx;
+      generate(false);
+      ctx = prevCtx;
+      const theme = MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
+      drawTileGridOverlay(indexCtx, indexCanvas, theme.overworld, tileCols, tileRows);
+      files.push({ name: 'tile-index.png', data: await canvasToPngBytes(indexCanvas) });
+
+      const total = tileCols * tileRows;
+      let done = 0;
+      for (let r = 0; r < tileRows; r++) {
+        for (let c = 0; c < tileCols; c++) {
+          done++;
+          statusEl.textContent = `Rendering tile ${done}/${total} (row ${r + 1}, col ${c + 1})...`;
+          await yieldToPaint();
+          const url = buildTileMapUrl(c, r, tileCols, tileRows);
+          const params = new URLSearchParams(url.split('?')[1]);
+          const tempContainer = document.createElement('div');
+          renderDetailMap(tempContainer, params);
+          const data = await canvasToPngBytes(tempContainer.querySelector('canvas'));
+          files.push({ name: `tiles/row${r + 1}-col${c + 1}.png`, data });
+        }
+      }
+
+      statusEl.textContent = 'Building zip...';
+      await yieldToPaint();
+      const blob = createZipBlob(files);
+      const a = document.createElement('a');
+      a.download = `campaign-hub-tiles-seed-${currentSeed}.zip`;
+      a.href = URL.createObjectURL(blob);
+      a.click();
+      URL.revokeObjectURL(a.href);
+      statusEl.textContent = `Done -- ${total} tiles + index exported.`;
     } catch (err) {
       statusEl.textContent = `Export failed: ${err && err.message ? err.message : 'unknown error'}.`;
     } finally {
