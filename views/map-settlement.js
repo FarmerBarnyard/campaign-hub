@@ -128,7 +128,11 @@ function minAreaRect(poly) {
 // an unusually large Voronoi cell (a real occurrence at low cell counts,
 // e.g. village tier's 55 cells over a 160px radius) can't produce an
 // oversized rectangle that visibly pokes through the town boundary/wall.
-function drawFootprintRect(ctx, rect, shrink, fillStyle, maxDim) {
+// An optional `strokeStyle` outlines the footprint -- a visible wall line
+// is what makes a filled rectangle actually read as a structure rather
+// than a colored tile. Returns the final {w, h} drawn (post-floor/cap) so
+// callers can layer further detail (a roof ridge) at the same scale.
+function drawFootprintRect(ctx, rect, shrink, fillStyle, maxDim, strokeStyle) {
   let w = Math.max(4, rect.w * shrink), h = Math.max(4, rect.h * shrink);
   if (maxDim) { w = Math.min(w, maxDim); h = Math.min(h, maxDim); }
   ctx.save();
@@ -136,6 +140,31 @@ function drawFootprintRect(ctx, rect, shrink, fillStyle, maxDim) {
   ctx.rotate(rect.angle);
   ctx.fillStyle = fillStyle;
   ctx.fillRect(-w / 2, -h / 2, w, h);
+  if (strokeStyle) {
+    ctx.strokeStyle = strokeStyle;
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.45;
+    ctx.strokeRect(-w / 2, -h / 2, w, h);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+  return { w, h };
+}
+
+// A single ridge line down a building's long axis -- the cheapest possible
+// "this rectangle has a pitched roof" signal, drawn in the same rotated
+// local frame drawFootprintRect used.
+function drawRoofRidge(ctx, rect, w, h, strokeStyle) {
+  ctx.save();
+  ctx.translate(rect.cx, rect.cy);
+  ctx.rotate(rect.angle);
+  ctx.strokeStyle = strokeStyle;
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.5;
+  ctx.beginPath();
+  if (w >= h) { ctx.moveTo(-w / 2, 0); ctx.lineTo(w / 2, 0); } else { ctx.moveTo(0, -h / 2); ctx.lineTo(0, h / 2); }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
   ctx.restore();
 }
 
@@ -689,7 +718,8 @@ function renderSettlementMap(container, params) {
       const shrink = minS + buildingRng() * (maxS - minS);
 
       const rect = minAreaRect(cell.polygon);
-      drawFootprintRect(ctx, rect, shrink, lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac), R * 0.3);
+      const dims = drawFootprintRect(ctx, rect, shrink, lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac), R * 0.3, palette.ink);
+      drawRoofRidge(ctx, rect, dims.w, dims.h, palette.ink);
     }
 
     // POI footprints, drawn after ordinary buildings so they read as
@@ -704,16 +734,69 @@ function renderSettlementMap(container, params) {
       const isTemple = p.poiKey === 'temple';
       const shrink = isTemple ? TEMPLE_BY_TIER[tierKey].shrink : 0.85;
       const maxDim = R * (isTemple ? TEMPLE_BY_TIER[tierKey].maxDimFrac : 0.35);
-      drawFootprintRect(ctx, rect, shrink, palette.poiFill, maxDim);
+      const dims = drawFootprintRect(ctx, rect, shrink, palette.poiFill, maxDim, palette.ink);
+      if (isTemple) drawRoofRidge(ctx, rect, dims.w, dims.h, palette.ink);
       drawSettlementPOIIcon(ctx, p.cell.x, p.cell.y - 8, p.poiType.iconKey, palette.ink);
       ctx.fillStyle = palette.ink;
       ctx.fillText(p.displayLabel, p.cell.x, p.cell.y + 6);
+      // Market-day stalls: a handful of small tent triangles scattered
+      // just around the square's own footprint -- the single most
+      // recognizable "medieval market" visual cue.
+      if (p.poiKey === 'market') {
+        for (let s = 0; s < 4; s++) {
+          const sAngle = (s / 4) * Math.PI * 2 + 0.4;
+          const sx = p.cell.x + Math.cos(sAngle) * (dims.w * 0.55);
+          const sy = p.cell.y + Math.sin(sAngle) * (dims.h * 0.55);
+          ctx.fillStyle = palette.poiFill;
+          ctx.globalAlpha = 0.75;
+          ctx.beginPath();
+          ctx.moveTo(sx - 3, sy + 3); ctx.lineTo(sx, sy - 4); ctx.lineTo(sx + 3, sy + 3);
+          ctx.closePath();
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+      }
     }
 
     ctx.fillStyle = palette.plaza;
     ctx.beginPath();
     ctx.arc(hubX, hubY, plazaR, 0, Math.PI * 2);
     ctx.fill();
+    // A well at the market's own center -- a ring plus a crossed bucket-
+    // rope, the classic anchor of a real market square, instead of a bare
+    // circle of open ground.
+    ctx.strokeStyle = palette.ink;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(hubX, hubY, plazaR * 0.35, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(hubX - plazaR * 0.32, hubY - plazaR * 0.32); ctx.lineTo(hubX + plazaR * 0.32, hubY + plazaR * 0.32);
+    ctx.moveTo(hubX + plazaR * 0.32, hubY - plazaR * 0.32); ctx.lineTo(hubX - plazaR * 0.32, hubY + plazaR * 0.32);
+    ctx.stroke();
+
+    // Kitchen-garden/orchard patches: real medieval houses backed onto a
+    // garden strip, most visible near the walls where building density
+    // thins out -- scattered into the bare band the 0.9 boundary-margin
+    // inset already leaves open between the outermost buildings and the
+    // wall, rather than a bespoke plot-subdivision system.
+    const gardenRng = mulberry32(seed + 606161);
+    const gardenClusterCount = Math.round(config.cellCount * 0.12);
+    for (let i = 0; i < gardenClusterCount; i++) {
+      const angle = gardenRng() * Math.PI * 2;
+      const r = effectiveR(angle) * (0.90 + gardenRng() * 0.08);
+      const gx = cx + Math.cos(angle) * r, gy = cy + Math.sin(angle) * r;
+      if (insideCastle(gx, gy)) continue;
+      const dots = 2 + Math.floor(gardenRng() * 3);
+      ctx.fillStyle = palette.gardenFill;
+      ctx.globalAlpha = 0.5;
+      for (let k = 0; k < dots; k++) {
+        ctx.beginPath();
+        ctx.arc(gx + (gardenRng() - 0.5) * 12, gy + (gardenRng() - 0.5) * 12, 1.6 + gardenRng() * 1.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
 
     // Castle compound: its own walled bailey (courtyard fill + a distinct
     // toothed wall with corner towers) and a dominant keep -- drawn on top
@@ -829,6 +912,14 @@ function renderSettlementMap(container, params) {
       ctx.lineWidth = 1.5;
       ctx.stroke();
     }
+
+    // Fine parchment-grain texture over the whole finished composition --
+    // same helper/convention every other generator here uses (reuses this
+    // theme's own overworld.grain tuning rather than inventing a settlement-
+    // specific one), unclipped since it's meant to read as the physical
+    // page the map is drawn on, not something confined to the town itself.
+    const grainRng = mulberry32(seed + 141414);
+    paintParchmentGrain(ctx, canvas, grainRng, theme.overworld.grain);
 
     // Notable-locations panel: plain DOM text below the canvas, not part of
     // the PNG export (matches every other generator's "canvas is the
