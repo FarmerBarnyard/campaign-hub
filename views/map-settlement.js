@@ -313,7 +313,11 @@ function renderSettlementMap(container, params) {
   // of the on-screen canvas, then restores it.
   let ctx = canvas.getContext('2d');
 
-  function generate() {
+  // async + yieldToPaint (lib/generation-progress.js) so the progress
+  // overlay can repaint between phases -- see showGenerationProgress's own
+  // header comment for why this exists.
+  async function generate() {
+    const progress = showGenerationProgress(canvas, 'Laying out streets…');
     const theme = MAP_THEMES[container.querySelector('#st-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
     const palette = theme.settlement;
 
@@ -323,7 +327,9 @@ function renderSettlementMap(container, params) {
     // siting, the hub offset, the secondary-lane network, and the castle
     // each get their own stream so toggling/regenerating any one of them
     // never perturbs the others or the town layout itself when a theme
-    // switch redraws the same seed.
+    // switch redraws the same seed. roadRng is dedicated to the organic-
+    // road ribbon's own cosmetic width jitter (lib/organic-roads.js),
+    // isolated from streetRng's geometry rolls above it.
     const meshRng = mulberry32(seed + 77777);
     const wallRng = mulberry32(seed + 991);
     const buildingRng = mulberry32(seed + 55555);
@@ -333,6 +339,7 @@ function renderSettlementMap(container, params) {
     const hubRng = mulberry32(seed + 505050);
     const laneRng = mulberry32(seed + 404040);
     const castleRng = mulberry32(seed + 909090);
+    const roadRng = mulberry32(seed + 202020);
 
     const cx = canvas.width / 2, cy = canvas.height / 2;
     const R = config.radius;
@@ -625,6 +632,8 @@ function renderSettlementMap(container, params) {
     // across the whole canvas. Falls back to today's exact flat ground fill
     // when no guide data was supplied (old bookmarked links, or a caller
     // that hasn't been updated -- see views/map-overworld.js).
+    await yieldToPaint();
+    progress.update(0.3, 'Painting terrain…');
     if (sampleGuide) {
       renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone: null, palette: theme.overworld });
     } else {
@@ -648,48 +657,49 @@ function renderSettlementMap(container, params) {
     // Street network: spokes radiating from the hub (uneven length),
     // wobbled concentric rings around the hub (broken into arcs by their
     // own gaps), organic branch stubs, and the dense secondary-lane maze.
-    ctx.strokeStyle = palette.street;
-    ctx.lineWidth = streetWidth;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
+    // Every tier draws strokeOrganicRoad (lib/organic-roads.js) instead of
+    // a flat uniform-width stroke -- village gets a soft dirt-lane look
+    // (surface:'dirt', wider wobble), town/city a firmer paved-street look
+    // (surface:'stone').
+    const mainSurface = tierKey === 'village' ? 'dirt' : 'stone';
     for (let si = 0; si < spokeAngles.length; si++) {
       const angle = spokeAngles[si];
       const len = effectiveR(angle) * spokeLengthFrac[si];
-      ctx.beginPath();
-      ctx.moveTo(hubX + Math.cos(angle) * plazaR, hubY + Math.sin(angle) * plazaR);
-      ctx.lineTo(hubX + Math.cos(angle) * len, hubY + Math.sin(angle) * len);
-      ctx.stroke();
+      const pts = [
+        { x: hubX + Math.cos(angle) * plazaR, y: hubY + Math.sin(angle) * plazaR },
+        { x: hubX + Math.cos(angle) * len, y: hubY + Math.sin(angle) * len },
+      ];
+      strokeOrganicRoad(ctx, pts, { color: palette.street, edgeColor: palette.ink, width: streetWidth, rng: roadRng, surface: mainSurface });
     }
     const ringSegments = 96;
     for (let i = 0; i < ringRadii.length; i++) {
-      ctx.beginPath();
-      let penDown = false;
+      let seg = [];
       for (let s = 0; s <= ringSegments; s++) {
         const angle = (s / ringSegments) * Math.PI * 2;
-        if (inRingGap(i, angle)) { penDown = false; continue; }
+        if (inRingGap(i, angle)) {
+          if (seg.length > 1) strokeOrganicRoad(ctx, seg, { color: palette.street, edgeColor: palette.ink, width: streetWidth, rng: roadRng, surface: mainSurface });
+          seg = [];
+          continue;
+        }
         const r = ringRadiusAt(i, angle);
-        const x = hubX + Math.cos(angle) * r, y = hubY + Math.sin(angle) * r;
-        if (!penDown) { ctx.moveTo(x, y); penDown = true; } else ctx.lineTo(x, y);
+        seg.push({ x: hubX + Math.cos(angle) * r, y: hubY + Math.sin(angle) * r });
       }
-      ctx.stroke();
+      if (seg.length > 1) strokeOrganicRoad(ctx, seg, { color: palette.street, edgeColor: palette.ink, width: streetWidth, rng: roadRng, surface: mainSurface });
     }
-    ctx.lineWidth = Math.max(6, streetWidth * 0.6);
+    const branchWidth = Math.max(6, streetWidth * 0.6);
     for (const seg of branchSegments) {
-      ctx.beginPath();
-      ctx.moveTo(seg.x1, seg.y1);
-      ctx.lineTo(seg.x2, seg.y2);
-      ctx.stroke();
+      strokeOrganicRoad(ctx, [{ x: seg.x1, y: seg.y1 }, { x: seg.x2, y: seg.y2 }], { color: palette.street, edgeColor: palette.ink, width: branchWidth, rng: roadRng, surface: mainSurface });
     }
-    ctx.lineWidth = Math.max(3, streetWidth * 0.32);
+    const laneWidth = Math.max(3, streetWidth * 0.32);
+    ctx.save();
     ctx.globalAlpha = 0.85;
     for (const line of laneNetwork) {
-      ctx.beginPath();
-      ctx.moveTo(line[0].x, line[0].y);
-      for (let i = 1; i < line.length; i++) ctx.lineTo(line[i].x, line[i].y);
-      ctx.stroke();
+      strokeOrganicRoad(ctx, line, { color: palette.street, edgeColor: palette.ink, width: laneWidth, rng: roadRng, surface: 'dirt' });
     }
-    ctx.globalAlpha = 1;
+    ctx.restore();
 
+    await yieldToPaint();
+    progress.update(0.5, 'Placing buildings…');
     // Gate angles computed before buildings/POIs so guard-post siting can
     // require proximity to one -- purely angular, no radius dependency, so
     // wobbling the boundary above can't perturb gate placement or width.
@@ -816,8 +826,12 @@ function renderSettlementMap(container, params) {
       const shrink = minS + buildingRng() * (maxS - minS);
 
       const rect = fitRectToPolygon(minAreaRect(cell.polygon), cellArea(cell));
-      const dims = drawFootprintRect(ctx, rect, shrink, lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac), R * 0.3, palette.ink);
-      drawRoofRidge(ctx, rect, dims.w, dims.h, palette.ink);
+      const maxDim = R * 0.3;
+      let w = Math.max(4, rect.w * shrink), h = Math.max(4, rect.h * shrink);
+      if (maxDim) { w = Math.min(w, maxDim); h = Math.min(h, maxDim); }
+      drawPictorialBuilding(ctx, rect, w, h, {
+        baseColor: lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac), ink: palette.ink, rng: buildingRng,
+      });
     }
 
     // POI footprints, drawn after ordinary buildings so they read as
@@ -832,8 +846,10 @@ function renderSettlementMap(container, params) {
       const isTemple = p.poiKey === 'temple';
       const shrink = isTemple ? TEMPLE_BY_TIER[tierKey].shrink : 0.90;
       const maxDim = R * (isTemple ? TEMPLE_BY_TIER[tierKey].maxDimFrac : 0.35);
-      const dims = drawFootprintRect(ctx, rect, shrink, palette.poiFill, maxDim, palette.ink);
-      if (isTemple) drawRoofRidge(ctx, rect, dims.w, dims.h, palette.ink);
+      let w = Math.max(4, rect.w * shrink), h = Math.max(4, rect.h * shrink);
+      if (maxDim) { w = Math.min(w, maxDim); h = Math.min(h, maxDim); }
+      drawPictorialBuilding(ctx, rect, w, h, { baseColor: palette.poiFill, ink: palette.ink, rng: poiRng });
+      const dims = { w, h };
       drawSettlementPOIIcon(ctx, p.cell.x, p.cell.y - 8, p.poiType.iconKey, palette.ink);
       ctx.fillStyle = palette.ink;
       ctx.fillText(p.displayLabel, p.cell.x, p.cell.y + 6);
@@ -896,6 +912,8 @@ function renderSettlementMap(container, params) {
       ctx.globalAlpha = 1;
     }
 
+    await yieldToPaint();
+    progress.update(0.7, 'Raising walls…');
     // Castle compound: its own walled bailey (courtyard fill + a distinct
     // toothed wall with corner towers) and a dominant keep -- drawn on top
     // of everything else placed so far, still inside the terrain clip so
@@ -1019,6 +1037,8 @@ function renderSettlementMap(container, params) {
     // theme's own overworld.grain tuning rather than inventing a settlement-
     // specific one), unclipped since it's meant to read as the physical
     // page the map is drawn on, not something confined to the town itself.
+    await yieldToPaint();
+    progress.update(0.9, 'Finishing…');
     const grainRng = mulberry32(seed + 141414);
     paintParchmentGrain(ctx, canvas, grainRng, theme.overworld.grain);
 
@@ -1034,14 +1054,15 @@ function renderSettlementMap(container, params) {
     } else {
       poiEl.innerHTML = '';
     }
+    progress.done();
   }
 
   generate();
   container.querySelector('#st-theme').addEventListener('change', generate);
-  wireMapExportSave(container, canvas, 'st', (offCtx) => {
+  wireMapExportSave(container, canvas, 'st', async (offCtx) => {
     const prevCtx = ctx;
     ctx = offCtx;
-    generate();
+    await generate();
     ctx = prevCtx;
   });
 }

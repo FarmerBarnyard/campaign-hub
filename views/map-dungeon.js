@@ -28,21 +28,28 @@ function populateCampaignSelect(selectEl) {
 function wireMapExportSave(container, canvas, prefix, renderAtScale) {
   const EXPORT_SCALE = 2;
 
-  function exportSource() {
+  // `renderAtScale` may now be an async function (every generate() in this
+  // app was converted to async-yielding to drive the generation-progress
+  // overlay -- lib/generation-progress.js) -- `await` on a plain
+  // synchronous return value is a harmless no-op, so this stays correct
+  // for any caller whether or not its own renderAtScale happens to be
+  // async. Without this await, toDataURL() below could fire mid-render on
+  // an async generate(), capturing a half-drawn offscreen canvas.
+  async function exportSource() {
     if (!renderAtScale) return canvas;
     const off = document.createElement('canvas');
     off.width = canvas.width * EXPORT_SCALE;
     off.height = canvas.height * EXPORT_SCALE;
     const offCtx = off.getContext('2d');
     offCtx.scale(EXPORT_SCALE, EXPORT_SCALE);
-    renderAtScale(offCtx);
+    await renderAtScale(offCtx);
     return off;
   }
 
-  container.querySelector(`#${prefix}-export`).addEventListener('click', () => {
+  container.querySelector(`#${prefix}-export`).addEventListener('click', async () => {
     const a = document.createElement('a');
     a.download = 'map.png';
-    a.href = exportSource().toDataURL('image/png');
+    a.href = (await exportSource()).toDataURL('image/png');
     a.click();
   });
 
@@ -54,7 +61,7 @@ function wireMapExportSave(container, canvas, prefix, renderAtScale) {
     if (!filename.endsWith('.png')) filename += '.png';
     if (!campaign) { statusEl.textContent = 'No campaign selected — create one in the Library first.'; return; }
     try {
-      const res = await Api.post('/map/save-image', { campaign, filename, dataUrl: exportSource().toDataURL('image/png') });
+      const res = await Api.post('/map/save-image', { campaign, filename, dataUrl: (await exportSource()).toDataURL('image/png') });
       statusEl.textContent = `Saved. Paste ${res.wikilink} into a note to link it.`;
     } catch (e) {
       if (e.code === 'unauthenticated') {
@@ -163,7 +170,12 @@ function renderDungeonMap(container) {
   // redraws there instead of the on-screen canvas, then restores it.
   let ctx = canvas.getContext('2d');
 
-  function generate() {
+  // async + yieldToPaint (lib/generation-progress.js) so the progress
+  // overlay can actually repaint between phases instead of the whole
+  // function blocking the tab for its entire duration -- see
+  // showGenerationProgress's own header comment for why this exists.
+  async function generate() {
+    const progress = showGenerationProgress(canvas, 'Carving rooms & corridors…');
     const seed = parseInt(container.querySelector('#dg-seed').value, 10) || 1;
     const gw = parseInt(container.querySelector('#dg-w').value, 10) || 60;
     const gh = parseInt(container.querySelector('#dg-h').value, 10) || 40;
@@ -231,6 +243,8 @@ function renderDungeonMap(container) {
     }
 
     split(0, 0, gw, gh, 0);
+    await yieldToPaint();
+    progress.update(0.25, 'Shaping rooms…');
 
     // Room-shape variety: most rooms stay plain rectangles (the safest
     // shape for tactical grid combat), but a minority roll into a distinct
@@ -302,6 +316,8 @@ function renderDungeonMap(container) {
     // Rendered below in the .dungeon-key DOM panel, not on-canvas (no room
     // for ~20 room entries in the fixed-size legend card).
     assignDungeonRoomContent(rooms, contentRng);
+    await yieldToPaint();
+    progress.update(0.45, 'Painting floor…');
 
     ctx.fillStyle = palette.rock;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -369,6 +385,8 @@ function renderDungeonMap(container) {
     }
     strokeDungeonLoops(floorLoops);
     strokeDungeonLoops(roomLoops);
+    await yieldToPaint();
+    progress.update(0.65, 'Adding texture…');
 
     // Light rubble/debris texture inside rooms (not corridors) -- a sparse
     // scatter of small dots, gated by probability so it reads as clutter
@@ -397,15 +415,18 @@ function renderDungeonMap(container) {
     // the debris scatter, own rng stream, so it never perturbs debris
     // placement or the layout.
     scatterDungeonProps(ctx, grid, gw, gh, rooms, cell, propRng, palette);
+    await yieldToPaint();
+    progress.update(0.85, 'Placing doors & traps…');
 
     // Room numbers -- content (purpose/flavor) lives in the .dungeon-key
-    // DOM panel below the map, keyed by this same number.
-    ctx.font = '9px sans-serif';
-    ctx.fillStyle = palette.door;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
+    // DOM panel below the map, keyed by this same number. Numbered badge
+    // (lib/keyed-legend.js) instead of bare fillText -- same convention
+    // the settlement generator's POI markers use, so both generators key
+    // their DOM panels the same visual way.
     for (const room of rooms) {
-      ctx.fillText(String(room.number), room.cx * cell + cell / 2, room.cy * cell + cell / 2);
+      drawNumberedBadge(ctx, room.cx * cell + cell / 2, room.cy * cell + cell / 2, room.number, {
+        fill: palette.room, ink: palette.door, radius: Math.max(6, cell * 0.28),
+      });
     }
 
     // Door / secret-door ticks: found from each corridor cell's own
@@ -461,15 +482,16 @@ function renderDungeonMap(container) {
     keyEl.innerHTML = `<h3>Room key</h3>` + sortedRooms.map((r) =>
       `<p class="key-room"><span class="key-room-num">${r.number}</span> <strong>${r.purpose}</strong><br>${r.flavor}</p>`
     ).join('');
+    progress.done();
   }
 
   generate();
   container.querySelector('#dg-regen').addEventListener('click', generate);
   container.querySelector('#dg-theme').addEventListener('change', generate);
-  wireMapExportSave(container, canvas, 'dg', (offCtx) => {
+  wireMapExportSave(container, canvas, 'dg', async (offCtx) => {
     const prevCtx = ctx;
     ctx = offCtx;
-    generate();
+    await generate();
     ctx = prevCtx;
   });
 }

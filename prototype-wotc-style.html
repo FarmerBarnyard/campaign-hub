@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WotC-style prototype — Step 0</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  body { padding: 20px 24px 60px; }
+  .proto-section { margin-bottom: 40px; }
+  .proto-section h2 { font-size: 1.1rem; margin-bottom: 6px; }
+  .proto-section p.note { color: var(--text-dim); font-size: 0.85rem; margin: 0 0 12px; max-width: 720px; }
+  .proto-row { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  canvas.proto-canvas { background: #ded0a3; border: 1px solid var(--border); border-radius: 4px; }
+  .proto-canvas-label { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1 class="wordmark" style="margin-bottom: 4px;">WotC-style prototype — Step 0</h1>
+<p class="note" style="max-width:720px;color:var(--text-dim);margin-bottom:30px;">Standalone, not wired into the app's router — for visual sign-off only, before any of the 4 real generators are touched.</p>
+
+<div class="proto-section">
+  <h2>1. Pictorial buildings</h2>
+  <p class="note">drawPictorialBuilding (lib/pictorial-buildings.js) at normal settlement scale, vs. the same buildings scaled down to the overworld marker size (9-18px). The plan recommends overworld markers stay abstract silhouettes rather than using this — compare the two rows below to judge that call directly instead of just asserting it.</p>
+  <div class="proto-row">
+    <div><canvas id="c-buildings-normal" class="proto-canvas" width="480" height="180"></canvas><div class="proto-canvas-label">Settlement scale</div></div>
+    <div><canvas id="c-buildings-tiny" class="proto-canvas" width="220" height="60"></canvas><div class="proto-canvas-label">Overworld marker scale (9-18px)</div></div>
+  </div>
+</div>
+
+<div class="proto-section">
+  <h2>2. Organic roads</h2>
+  <p class="note">strokeOrganicRoad (lib/organic-roads.js): dirt (village lane), stone (town/city street), and a thinner overworld-scale ribbon, all on the same curving centerline.</p>
+  <canvas id="c-roads" class="proto-canvas" width="620" height="220"></canvas>
+</div>
+
+<div class="proto-section">
+  <h2>3. Numbered badge + legend</h2>
+  <p class="note">drawNumberedBadge + renderKeyLegendPanel (lib/keyed-legend.js) — same markup/CSS as the dungeon's existing room-key panel, generalized for settlement POIs.</p>
+  <div class="proto-row">
+    <canvas id="c-badges" class="proto-canvas" width="360" height="160"></canvas>
+    <div class="dungeon-key" id="badge-legend" style="margin-top:0;"></div>
+  </div>
+</div>
+
+<div class="proto-section">
+  <h2>4. Mock village cluster</h2>
+  <p class="note">A hand-placed stand-in for the full sparse-cluster algorithm: 2-3 loose groups of pictorial buildings, each oriented to face its nearest dirt path, real gaps between clusters (not one packed block).</p>
+  <canvas id="c-village" class="proto-canvas" width="520" height="360"></canvas>
+</div>
+
+<div class="proto-section">
+  <h2>5. Generation-progress overlay</h2>
+  <p class="note">showGenerationProgress (lib/generation-progress.js), threshold-gated at 450ms. Click to run a fake ~2.5s staged "generation" and watch the bar appear/update/disappear.</p>
+  <div class="map-layout" style="max-width:520px;">
+    <canvas id="c-progress-demo" class="proto-canvas" width="520" height="180"></canvas>
+  </div>
+  <button id="run-progress-demo" style="margin-top:10px;">Run fake slow generation</button>
+</div>
+
+<script src="lib/noise.js"></script>
+<script src="lib/voronoi-mesh.js"></script>
+<script src="lib/watercolor-wash.js"></script>
+<script src="lib/pictorial-buildings.js"></script>
+<script src="lib/organic-roads.js"></script>
+<script src="lib/keyed-legend.js"></script>
+<script src="lib/generation-progress.js"></script>
+<script>
+const rng = mulberry32(42);
+
+// --- 1. Pictorial buildings ---
+(function () {
+  const ctx1 = document.getElementById('c-buildings-normal').getContext('2d');
+  ctx1.fillStyle = '#ded0a3'; ctx1.fillRect(0, 0, 480, 180);
+  const colors = ['rgb(90,58,30)', 'rgb(184,153,104)', 'rgb(140,105,60)', 'rgb(70,50,30)'];
+  let x = 50;
+  for (let i = 0; i < 8; i++) {
+    const w = 40 + rng() * 30, h = 30 + rng() * 25;
+    const angle = (rng() - 0.5) * 1.2;
+    const cx = x, cy = 70 + (i % 2) * 60;
+    drawPictorialBuilding(ctx1, { cx, cy, angle }, w, h, { baseColor: colors[i % colors.length], ink: 'rgba(59,42,20,0.7)', rng });
+    x += 55;
+  }
+
+  const ctx2 = document.getElementById('c-buildings-tiny').getContext('2d');
+  ctx2.fillStyle = '#ded0a3'; ctx2.fillRect(0, 0, 220, 60);
+  let x2 = 20;
+  for (let i = 0; i < 8; i++) {
+    const w = 9 + rng() * 6, h = 7 + rng() * 5;
+    drawPictorialBuilding(ctx2, { cx: x2, cy: 30, angle: (rng() - 0.5) * 1.2 }, w, h, { baseColor: colors[i % colors.length], ink: 'rgba(59,42,20,0.7)', rng });
+    x2 += 26;
+  }
+})();
+
+// --- 2. Organic roads ---
+(function () {
+  const ctx = document.getElementById('c-roads').getContext('2d');
+  ctx.fillStyle = '#ded0a3'; ctx.fillRect(0, 0, 620, 220);
+  const centerline = [{x:20,y:180},{x:120,y:120},{x:220,y:150},{x:330,y:60},{x:460,y:90},{x:600,y:40}];
+  const offset = (pts, dy) => pts.map(p => ({x:p.x, y:p.y+dy}));
+  strokeOrganicRoad(ctx, offset(centerline, 0), { color: '#c9b483', edgeColor: 'rgba(59,42,20,0.6)', width: 22, rng, surface: 'dirt' });
+  strokeOrganicRoad(ctx, offset(centerline, -60), { color: '#b9a06a', edgeColor: 'rgba(59,42,20,0.6)', width: 16, rng, surface: 'stone' });
+  strokeOrganicRoad(ctx, offset(centerline, -110), { color: 'rgba(74,50,20,0.75)', edgeColor: 'rgba(59,42,20,0.5)', width: 5, rng, surface: 'stone' });
+  ctx.fillStyle = '#3b2a14'; ctx.font = '11px sans-serif';
+  ctx.fillText('dirt lane (wide, soft)', 20, 205);
+  ctx.fillText('paved street', 20, 145);
+  ctx.fillText('overworld-scale road', 20, 95);
+})();
+
+// --- 3. Numbered badge + legend ---
+(function () {
+  const ctx = document.getElementById('c-badges').getContext('2d');
+  ctx.fillStyle = '#ded0a3'; ctx.fillRect(0, 0, 360, 160);
+  const spots = [{x:60,y:50},{x:170,y:90},{x:280,y:40},{x:120,y:130}];
+  spots.forEach((s, i) => drawNumberedBadge(ctx, s.x, s.y, i + 1, { fill: '#c9a227', ink: 'rgba(59,42,20,0.85)', radius: 9 }));
+  renderKeyLegendPanel(document.body, '#badge-legend', 'Notable locations', [
+    { number: 1, label: 'Market Square' },
+    { number: 2, label: 'Cathedral' },
+    { number: 3, label: 'Guard Post' },
+    { number: 4, label: "Stonehill Inn" },
+  ]);
+})();
+
+// --- 4. Mock village cluster ---
+(function () {
+  const ctx = document.getElementById('c-village').getContext('2d');
+  ctx.fillStyle = '#ded0a3'; ctx.fillRect(0, 0, 520, 360);
+  const path = [{x:20,y:300},{x:120,y:260},{x:220,y:270},{x:320,y:200},{x:420,y:210},{x:500,y:140}];
+  strokeOrganicRoad(ctx, path, { color: '#c9b483', edgeColor: 'rgba(59,42,20,0.6)', width: 18, rng, surface: 'dirt' });
+  // branch to a second cluster
+  strokeOrganicRoad(ctx, [{x:220,y:270},{x:230,y:340},{x:260,y:360}], { color: '#c9b483', edgeColor: 'rgba(59,42,20,0.6)', width: 12, rng, surface: 'dirt' });
+
+  const colors = ['rgb(90,58,30)', 'rgb(184,153,104)', 'rgb(140,105,60)'];
+  // cluster 1, near path start
+  const cluster1 = [{x:60,y:250,angle:0.5},{x:100,y:220,angle:0.4},{x:75,y:200,angle:0.6}];
+  // cluster 2, mid-path (near branch)
+  const cluster2 = [{x:250,y:230,angle:-0.3},{x:280,y:250,angle:-0.2},{x:255,y:330,angle:1.4}];
+  // cluster 3, near path end
+  const cluster3 = [{x:450,y:170,angle:0.2},{x:480,y:190,angle:0.1}];
+  [...cluster1, ...cluster2, ...cluster3].forEach((b, i) => {
+    const w = 34 + rng() * 14, h = 26 + rng() * 10;
+    drawPictorialBuilding(ctx, { cx: b.x, cy: b.y, angle: b.angle }, w, h, { baseColor: colors[i % colors.length], ink: 'rgba(59,42,20,0.7)', rng });
+  });
+})();
+
+// --- 5. Progress overlay demo ---
+document.getElementById('run-progress-demo').addEventListener('click', async () => {
+  const canvas = document.getElementById('c-progress-demo');
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ded0a3'; ctx.fillRect(0, 0, 520, 180);
+  const ctrl = showGenerationProgress(canvas, 'Building mesh…');
+  const stages = ['Building mesh…', 'Painting terrain…', 'Placing buildings…', 'Drawing streets…', 'Finishing…'];
+  for (let i = 0; i < stages.length; i++) {
+    ctrl.update(i / stages.length, stages[i]);
+    await new Promise(r => setTimeout(r, 500));
+  }
+  ctrl.update(1, 'Done');
+  await new Promise(r => setTimeout(r, 300));
+  ctrl.done();
+  ctx.fillStyle = '#3b2a14'; ctx.font = '12px sans-serif';
+  ctx.fillText('(fake generation complete)', 20, 30);
+});
+</script>
+</body>
+</html>

@@ -166,7 +166,7 @@ form label input, form label textarea, form label select { display: block; width
 .wikilink-resolved { color: var(--accent-bright); cursor: pointer; border-bottom: 1px dotted var(--accent-bright); }
 .note-embed { max-width: 100%; border-radius: 4px; margin: 8px 0; }
 
-.map-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+.map-layout { position: relative; display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
 .map-controls { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
 .map-controls label { font-size: 0.78rem; color: var(--text-dim); }
 .map-controls input, .map-controls select { width: 100%; margin-top: 3px; }
@@ -191,14 +191,36 @@ canvas { background: #000; border: 1px solid var(--border); border-radius: 4px; 
 .landmark-lore ul { margin: 4px 0; padding-left: 20px; }
 .landmark-lore li { margin: 2px 0; line-height: 1.4; }
 
-/* Dungeon room key (views/map-dungeon.js) -- one entry per numbered room,
-   same panel treatment as .landmark-lore above. */
-.dungeon-key .key-room { border-top: 1px solid var(--border); padding-top: 6px; }
-.dungeon-key .key-room:first-of-type { border-top: none; padding-top: 0; }
-.dungeon-key .key-room-num {
+/* Dungeon room key (views/map-dungeon.js) and the generalized numbered-
+   badge legend (lib/keyed-legend.js, used by views/map-settlement.js's
+   named POIs) -- one entry per numbered location, same panel treatment as
+   .landmark-lore above. Selectors shared across both so a settlement's
+   panel matches the dungeon's own look exactly rather than duplicating
+   the rules. */
+.dungeon-key .key-room, .settlement-poi-panel .key-room { border-top: 1px solid var(--border); padding-top: 6px; }
+.dungeon-key .key-room:first-of-type, .settlement-poi-panel .key-room:first-of-type { border-top: none; padding-top: 0; }
+.dungeon-key .key-room-num, .settlement-poi-panel .key-room-num {
   display: inline-block; min-width: 1.4em; text-align: center;
   color: var(--accent-bright); font-family: var(--mono); font-size: 0.85rem;
 }
+
+/* Generation-progress overlay (lib/generation-progress.js) -- absolutely
+   positioned over a generator's own canvas (inline left/top/width set per
+   canvas at creation time, since .map-layout is a flex row that can't
+   otherwise tell this overlay where the canvas itself actually sits). */
+.gen-progress-overlay {
+  position: absolute;
+  background: rgba(20, 18, 15, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  color: var(--text);
+  pointer-events: none;
+}
+.gen-progress-label { margin-bottom: 4px; }
+.gen-progress-track { height: 5px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+.gen-progress-fill { height: 100%; width: 0%; background: var(--accent-bright); transition: width 0.15s linear; }
 
 /* Settlement notable-locations panel (views/map-settlement.js) -- empty and
    collapses to nothing (via :empty) when a town has no eligible POIs. */

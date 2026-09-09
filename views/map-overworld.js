@@ -1615,7 +1615,14 @@ function renderOverworldMap(container) {
   // result, just without the mottled texture until the drag settles
   // (scheduleLiveRegen's trailing full-quality redraw, wired below) or the
   // user hits Regenerate/changes the theme.
-  function generate(fast) {
+  // async + yieldToPaint so the progress overlay can repaint between
+  // phases -- see lib/generation-progress.js. `fast` (live slider-drag
+  // ticks) skips the overlay entirely via the no-op stub below: those ticks
+  // are deliberately kept as fast as before, since the whole point of the
+  // live sliders is fluid drag feedback (see scheduleLiveRegen's own
+  // comment), not a progress bar for a sub-second redraw.
+  async function generate(fast) {
+    const progress = fast ? { update() {}, done() {} } : showGenerationProgress(canvas, 'Building world…');
     const seed = parseInt(container.querySelector('#ow-seed').value, 10) || 1;
     const cellCount = parseInt(container.querySelector('#ow-cells').value, 10) || 40000;
     const octaves = parseInt(container.querySelector('#ow-oct').value, 10) || 4;
@@ -1656,7 +1663,15 @@ function renderOverworldMap(container) {
     const rosetteRng = mulberry32(seed + 88888);
     const grainRng = mulberry32(seed + 13579);
     const borderRng = mulberry32(seed + 24680);
+    const roadRng = mulberry32(seed + 21212);
 
+    // buildWorld itself (mesh + hydraulic erosion + hydrology + settlement/
+    // road scoring) is one opaque synchronous call -- on a real cache miss
+    // it can't yield partway through without a much larger refactor of its
+    // internals, so the progress overlay can only actually repaint starting
+    // from this point onward. It's cached (see buildWorld's own comment),
+    // so this cost is paid once per {seed, cellCount, ...} combination, not
+    // on every render.
     const world = buildWorld(seed, cellCount, octaves, island, seaLevel, riversOn, settleCount, wildZonesOn);
     const {
       mesh, heights, cols, rows, cellW, cellH,
@@ -1665,6 +1680,8 @@ function renderOverworldMap(container) {
       wetlowlandOf, rangeIndexOf, rangeZoneOf, regionZoneOf,
       lakeIdOf, largestLakeId, landmarks,
     } = world;
+    await yieldToPaint();
+    progress.update(0.2, 'Painting terrain…');
 
     // `biome` is the LIVE classification (Vegetation/Ruggedness sliders
     // applied) used for the actual fill colors/texture/legend/theme-
@@ -1745,6 +1762,8 @@ function renderOverworldMap(container) {
     }
 
     if (!fast) {
+      await yieldToPaint();
+      progress.update(0.4, 'Painting highlands & forests…');
       // Forest wash: a contour on MOISTURE (not height) -- but moisture
       // itself is sampled over the WHOLE canvas independent of land/water
       // (unlike height, it was never masked to the landmass), so a raw
@@ -1927,6 +1946,8 @@ function renderOverworldMap(container) {
       ctx.stroke();
     }
 
+    await yieldToPaint();
+    progress.update(0.6, 'Carving rivers & lakes…');
     let riverSegmentCount = 0;
     if (riversOn) {
       // River networks are threaded into whole polylines (source to sea),
@@ -2004,14 +2025,13 @@ function renderOverworldMap(container) {
     // candidate scoring, placement, tiers, names, MST choice, and each
     // connection's Dijkstra route were all computed once in buildWorld(),
     // since none of it depends on anything the live sliders touch. Here we
-    // only draw them.
-    ctx.strokeStyle = palette.road;
-    ctx.lineWidth = 2;
+    // only draw them. strokeOrganicRoad (lib/organic-roads.js) replaces the
+    // old flat 2px stroke -- a modest ribbon width at this region scale
+    // (not settlement-lane width, which would look absurd zoomed out this
+    // far), Chaikin-smoothed with the same double-stroke halo edge the
+    // coastline/river passes above already use.
     for (const pts of roadPaths) {
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-      ctx.stroke();
+      strokeOrganicRoad(ctx, pts, { color: palette.road, edgeColor: palette.ink, width: 3.5, rng: roadRng, surface: 'stone' });
     }
 
     for (const s of settlements) {
@@ -2144,6 +2164,7 @@ function renderOverworldMap(container) {
     currentSeed = seed;
     currentSettlements = settlements;
     container.querySelector('#ow-settlement-action').innerHTML = '';
+    progress.done();
   }
 
   // Canvas has no native per-shape click events, so hit-testing is manual:
@@ -2527,10 +2548,10 @@ function renderOverworldMap(container) {
   container.querySelector('#ow-forest-bias').addEventListener('change', finishLiveRegen);
   container.querySelector('#ow-rugged-bias').addEventListener('input', scheduleLiveRegen);
   container.querySelector('#ow-rugged-bias').addEventListener('change', finishLiveRegen);
-  wireMapExportSave(container, canvas, 'ow', (offCtx) => {
+  wireMapExportSave(container, canvas, 'ow', async (offCtx) => {
     const prevCtx = ctx;
     ctx = offCtx;
-    generate(false);
+    await generate(false);
     ctx = prevCtx;
   });
 
@@ -2668,7 +2689,7 @@ function renderOverworldMap(container) {
       const indexCtx = indexCanvas.getContext('2d');
       const prevCtx = ctx;
       ctx = indexCtx;
-      generate(false);
+      await generate(false);
       ctx = prevCtx;
       const theme = MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
       drawTileGridOverlay(indexCtx, indexCanvas, theme.overworld, tileCols, tileRows);
