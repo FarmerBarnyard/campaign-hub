@@ -686,6 +686,7 @@ function renderSettlementMap(container, params) {
       boundaryPath2D.closePath();
       const isInsideBoundary = (x, y) => ctx.isPointInPath(boundaryPath2D, x, y);
       const riverRng = mulberry32(seed + 232323);
+      const candidates = [];
       for (const river of terrainResult.riverChains) {
         // Keep the longest contiguous run of points actually inside the
         // boundary -- a real river's total path is almost always far
@@ -700,12 +701,48 @@ function renderSettlementMap(container, params) {
         if (!runs.length) continue;
         runs.sort((a, b) => b.length - a.length);
         if (runs[0].length < 2) continue;
+        candidates.push({ points: runs[0], maxFlow: river.maxFlow });
+      }
+      // A real WotC town map shows ONE clean river (with maybe a
+      // tributary), never a tangle of every minor stream thread the
+      // hydrology sim found -- a very high-moisture spot can produce a
+      // dozen+ tiny fragments here, and rejecting building plots near
+      // EVERY one of them was observed to starve an entire city down to
+      // 2 buildings. Keep only the top 2 by length (the real river and,
+      // at most, one real tributary), discard the rest entirely --
+      // fixes both the over-rejection and the visual clutter at once.
+      candidates.sort((a, b) => b.points.length - a.points.length);
+      for (const river of candidates.slice(0, 2)) {
         const width = Math.min(26, streetWidth * (1.4 + Math.sqrt(river.maxFlow / (terrainResult.riverThreshold || 1)) * 0.6));
-        clippedRiverChains.push({ points: runs[0], width });
+        clippedRiverChains.push({ points: river.points, width });
         riverBuildMargin = Math.max(riverBuildMargin, width / 2 + 4);
-        strokeOrganicRoad(ctx, runs[0], { color: theme.overworld.river, edgeColor: palette.ink, width, rng: riverRng, surface: 'water' });
+        strokeOrganicRoad(ctx, river.points, { color: theme.overworld.river, edgeColor: palette.ink, width, rng: riverRng, surface: 'water' });
       }
     }
+
+    // Contour-hachure ground texture (lib/hachure-terrain.js) -- needed
+    // here even when a real backdrop was painted above, because the
+    // ground re-fill just above (and the flat-fill fallback when there's
+    // no backdrop at all) both paint a flat, textureless fill INSIDE the
+    // town boundary, covering over whatever hachures renderTerrainPatch
+    // drew underneath. There's no real elevation data inside a town's own
+    // footprint to drive a gradient from, so this uses radial distance
+    // from the market hub instead -- the strokes swirl in rings around
+    // the hub, which reads naturally against a street layout that's
+    // already ring/spoke-based, and costs nothing extra to compute.
+    // Clipped to the town boundary explicitly (not relying on the outer
+    // sampleGuide-gated clip above, which is a no-op when there's no
+    // backdrop at all) -- without this, the no-guide fallback path
+    // painted the radial hachure field across the ENTIRE canvas, well
+    // past the village itself, reading as a bullseye ripple across open
+    // bare ground instead of texture confined to the settlement.
+    const hachureRng = mulberry32(seed + 63819);
+    ctx.save();
+    pathFromBoundary();
+    ctx.clip();
+    paintHachureField(ctx, canvas.width, canvas.height, hachureRng, palette.ink,
+      (x, y) => -Math.hypot(x - hubX, y - hubY), null, { spacing: 4, strokeLen: 5 });
+    ctx.restore();
 
     // Street network: spokes radiating from the hub (uneven length),
     // wobbled concentric rings around the hub (broken into arcs by their
@@ -1009,12 +1046,9 @@ function renderSettlementMap(container, params) {
 
     // POI footprints, drawn after ordinary buildings so they read as
     // visually distinct: a wider shrink (bigger structure), a dedicated
-    // fill, an icon glyph, and a text label -- also road-facing, same
-    // reasoning as ordinary buildings above. The temple gets its
-    // tier-specific size instead of the shared default.
-    ctx.font = `bold 10px ${OW_SERIF}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
+    // fill, an icon glyph, and a halo-text label (lib/map-labels.js) --
+    // also road-facing, same reasoning as ordinary buildings above. The
+    // temple gets its tier-specific size instead of the shared default.
     for (const p of poiPlaced) {
       const poiTargetAngle = nearestRoadAngle(p.cell.x, p.cell.y, poiRng);
       const rect = fitRectToPolygon(projectPolyAtAngle(p.cell.polygon, poiTargetAngle), cellArea(p.cell));
@@ -1026,8 +1060,7 @@ function renderSettlementMap(container, params) {
       drawPictorialBuilding(ctx, rect, w, h, { baseColor: palette.poiFill, ink: palette.ink, rng: poiRng });
       const dims = { w, h };
       drawSettlementPOIIcon(ctx, p.cell.x, p.cell.y - 8, p.poiType.iconKey, palette.ink);
-      ctx.fillStyle = palette.ink;
-      ctx.fillText(p.displayLabel, p.cell.x, p.cell.y + 6);
+      drawHaloLabel(ctx, p.displayLabel, p.cell.x, p.cell.y + 11, undefined, undefined, { font: `bold 10px ${OW_SERIF}`, ink: palette.ink });
       // Market-day stalls: a handful of small tent triangles scattered
       // just around the square's own footprint -- the single most
       // recognizable "medieval market" visual cue.
@@ -1124,11 +1157,7 @@ function renderSettlementMap(container, params) {
       const cosA = Math.cos(c.angle), sinA = Math.sin(c.angle);
       const keepRect = { cx: c.cx + inward * cosA, cy: c.cy + inward * sinA, angle: c.angle, w: keepHalfW * 2, h: keepHalfH * 2 };
       drawFootprintRect(ctx, keepRect, 1, palette.wall);
-      ctx.font = `bold 11px ${OW_SERIF}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle = palette.ink;
-      ctx.fillText('Castle', c.cx, c.cy + c.halfH + 6);
+      drawHaloLabel(ctx, 'Castle', c.cx, c.cy + c.halfH + 11, undefined, undefined, { font: `bold 11px ${OW_SERIF}`, ink: palette.ink });
     }
 
     ctx.restore(); // undo the terrain clip (no-op if none was applied)

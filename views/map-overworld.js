@@ -37,37 +37,26 @@ function biomeAt(h, moist, seaLevel, forestBias, ruggedBias) {
 // which happens afterward against the (already-final) biome grid. Gated by
 // probability per biome so it reads as texture/iconography, not a solid
 // carpet of icons.
-function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink) {
+function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink, canopyColor) {
   const r = rng();
   switch (biome) {
     case 'forest': {
-      // Dense enough to read as a forest carpet (WotC-style regional maps
-      // never show bare ground under a forest biome) -- up to two trees per
-      // cell, each a two-tier conifer silhouette rather than one flat
-      // triangle, so the texture itself carries more art-quality detail.
+      // Pom-pom tree clusters (lib/tree-clusters.js) -- replaces the old
+      // two-tier conifer triangle. Confirmed directly against a real
+      // Phandalin crop: WotC's own forest texture is a scatter of round,
+      // overlapping, individually-lit canopy clusters, not a flat
+      // silhouette. `canopyColor` (the theme's own flat forest fill,
+      // e.g. palette.biomes.forest) drives the cluster's light/dark/
+      // highlight shading -- `ink` alone has no color information to
+      // shade with.
       if (r > 0.85) return;
-      const treeCount = 1 + Math.floor(rng() * 2);
-      for (let t = 0; t < treeCount; t++) {
+      const standCount = 1 + Math.floor(rng() * 2);
+      for (let t = 0; t < standCount; t++) {
         const tx = cx + (rng() - 0.5) * cw * 0.6;
         const ty = cy + (rng() - 0.5) * ch * 0.4;
-        const size = Math.min(cw, ch) * (0.22 + rng() * 0.14);
-        ctx.fillStyle = ink;
-        ctx.globalAlpha = 0.6;
-        ctx.beginPath();
-        ctx.moveTo(tx, ty - size);
-        ctx.lineTo(tx - size * 0.55, ty - size * 0.15);
-        ctx.lineTo(tx + size * 0.55, ty - size * 0.15);
-        ctx.closePath();
-        ctx.fill();
-        ctx.beginPath();
-        ctx.moveTo(tx, ty - size * 0.5);
-        ctx.lineTo(tx - size * 0.7, ty + size * 0.45);
-        ctx.lineTo(tx + size * 0.7, ty + size * 0.45);
-        ctx.closePath();
-        ctx.fill();
-        ctx.fillRect(tx - size * 0.07, ty + size * 0.35, size * 0.14, size * 0.3);
+        const size = Math.min(cw, ch) * (0.32 + rng() * 0.18);
+        drawTreeCluster(ctx, tx, ty, size, rng, canopyColor || '#4a6b3a', ink);
       }
-      ctx.globalAlpha = 1;
       break;
     }
     // 'mountains' and 'hills' texture is now paintRosetteTexture(), called
@@ -1757,7 +1746,7 @@ function renderOverworldMap(container) {
         const py = sy + (textureRng() - 0.5) * spacing * 0.6;
         const biome = biomeAtPoint(px, py);
         if (biome === 'hills' || biome === 'mountains' || biome === 'forest' || biome === 'barrens') continue; // wash+icon pass below, gated by !fast
-        paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink);
+        paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes.forest);
       }
     }
 
@@ -1828,7 +1817,7 @@ function renderOverworldMap(container) {
           if (biome === 'hills' || biome === 'mountains') {
             paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, biome === 'mountains');
           } else if (biome === 'forest' || biome === 'barrens') {
-            paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink);
+            paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes.forest);
           }
         }
       }
@@ -1922,6 +1911,24 @@ function renderOverworldMap(container) {
       extractFillableRegions(cols, rows, cellW, cellH, heightAt, snowT, canvas.width, canvas.height, minLoopArea),
       palette.biomes.snow
     );
+
+    // Contour-hachure ground texture (lib/hachure-terrain.js) -- see its
+    // own header comment. Gated behind !fast (skipped on live slider-drag
+    // ticks, same as the wash/rosette passes) since it's tens of
+    // thousands of strokes at this canvas size -- real cost, deliberately
+    // spent on a full-quality render, not on a sub-second drag tick whose
+    // whole point is staying fluid.
+    if (!fast) {
+      await yieldToPaint();
+      progress.update(0.55, 'Inking ground texture…');
+      const hachureRng = mulberry32(seed + 63819);
+      function hachureHeightAt(x, y) {
+        const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
+        const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
+        return heights[gy * cols + gx];
+      }
+      paintHachureField(ctx, canvas.width, canvas.height, hachureRng, palette.ink, hachureHeightAt, (x, y) => hachureHeightAt(x, y) < seaLevel);
+    }
 
     // Coastline: the same land/water threshold as the beach fill above,
     // reused rather than re-extracted -- the extra-ink glow/stroke below is
@@ -2072,10 +2079,11 @@ function renderOverworldMap(container) {
       placedLabelBoxes.push({ x1: boxX1, y1: boxY1, x2: boxX2, y2: boxY2 });
       // refBiome, not the live-biased biome -- matches convention #3
       // (settlement-adjacent visuals stay fixed under the live sliders).
-      ctx.fillStyle = labelColorFor(cellData[s.index].refBiome, palette);
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillText(s.name, px, py + r + 3);
+      // Halo label (lib/map-labels.js) instead of plain fillText -- a
+      // real WotC regional map's settlement names sit directly on a busy
+      // hachured/washed ground and stay legible via exactly this white
+      // halo, not by finding empty space to sit in.
+      drawHaloLabel(ctx, s.name, px, py + r + 8, undefined, undefined, { font: OW_TIER_FONT[s.tier], ink: labelColorFor(cellData[s.index].refBiome, palette) });
     }
 
     // Point-feature wild-zone landmarks (Ley Line Nexus, Astral Scar,
@@ -2083,13 +2091,9 @@ function renderOverworldMap(container) {
     // drawn here the same way settlements are: straight from the cache,
     // no live-slider dependence.
     if (wildZonesOn) {
-      ctx.font = `${OW_TIER_FONT.village}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
       for (const lm of landmarks) {
         drawWildZoneIcon(ctx, lm.x, lm.y, lm.key, palette.ink);
-        ctx.fillStyle = palette.label;
-        ctx.fillText(lm.name, lm.x, lm.y + 9);
+        drawHaloLabel(ctx, lm.name, lm.x, lm.y + 14, undefined, undefined, { font: OW_TIER_FONT.village, ink: palette.label });
       }
     }
 

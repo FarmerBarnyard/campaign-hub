@@ -405,7 +405,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
       const b = biomeAtPoint(px, py);
       if (b === 'hills' || b === 'mountains' || b === 'forest') continue;
       if (b !== 'deepwater' && b !== 'shallowwater' && !isGroundAt(px, py)) continue;
-      paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink);
+      paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes.forest);
     }
   }
 
@@ -435,7 +435,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
       if (b === 'hills' || b === 'mountains') {
         paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, b === 'mountains');
       } else if (b === 'forest') {
-        paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink);
+        paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes.forest);
       }
     }
   }
@@ -491,6 +491,23 @@ function renderTerrainPatch(ctx, canvas, opts) {
     extractFillableRegions(cols, rows, cellW, cellH, heightAt, snowT, canvas.width, canvas.height, minLoopArea),
     palette.biomes.snow
   );
+
+  // Contour-hachure ground texture (lib/hachure-terrain.js) -- the single
+  // biggest gap found cropping into a real Mike Schley export at high
+  // zoom: every real WotC regional/town map carries dense, short,
+  // terrain-following ink dashes over the ENTIRE landmass, not a flat
+  // biome color with a light noise grain. Drawn over every fill/wash/
+  // icon pass above and clipped to land (skips open water, which
+  // reference maps never hachure) but under the crisp coastline/river
+  // ink strokes below, so those stay clean rather than getting dashed
+  // over.
+  const hachureRng = mulberry32(seed + 63819);
+  function heightAtPixel(x, y) {
+    const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
+    const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
+    return heights[gy * cols + gx];
+  }
+  paintHachureField(ctx, canvas.width, canvas.height, hachureRng, palette.ink, heightAtPixel, (x, y) => heightAtPixel(x, y) < sea);
 
   ctx.lineJoin = 'round';
   for (const chain of beachLoops) {
