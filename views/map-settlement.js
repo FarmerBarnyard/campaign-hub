@@ -91,6 +91,12 @@ const TEMPLE_BY_TIER = {
   city: { label: 'Cathedral', shrink: 0.95, maxDimFrac: 0.42 },
 };
 
+// Village's sparse-cluster ordinary buildings (see generate() below) are
+// all one plain "Cottage" -- no wealth-gradient hovel/house/manor mix,
+// matching a real village's own uniformity next to its handful of named
+// buildings (Inn, Smithy, etc.).
+const VILLAGE_COTTAGE_SHRINK = [0.82, 0.93];
+
 function hexToRgb(hex) {
   const h = hex.replace('#', '');
   return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
@@ -103,45 +109,37 @@ function lerpBuildingColor(hexA, hexB, t) {
   return `rgb(${r},${g},${bl})`;
 }
 
-// Minimum-area oriented bounding rectangle via rotating calipers over the
-// polygon's own edges -- turns a raw, amorphous Voronoi cell polygon into
-// an actual rectangle (walls/corners a viewer recognizes as a building).
-// Cheap at the small vertex counts (4-8) these cell polygons actually have.
-function minAreaRect(poly) {
-  let best = null;
-  for (let i = 0; i < poly.length; i++) {
-    const p1 = poly[i], p2 = poly[(i + 1) % poly.length];
-    const edgeAngle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-    const cos = Math.cos(-edgeAngle), sin = Math.sin(-edgeAngle);
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const p of poly) {
-      const rx = p.x * cos - p.y * sin;
-      const ry = p.x * sin + p.y * cos;
-      if (rx < minX) minX = rx; if (rx > maxX) maxX = rx;
-      if (ry < minY) minY = ry; if (ry > maxY) maxY = ry;
-    }
-    const w = maxX - minX, h = maxY - minY;
-    const area = w * h;
-    if (!best || area < best.area) {
-      const ccx = (minX + maxX) / 2, ccy = (minY + maxY) / 2;
-      const cosB = Math.cos(edgeAngle), sinB = Math.sin(edgeAngle);
-      best = { area, w, h, angle: edgeAngle, cx: ccx * cosB - ccy * sinB, cy: ccx * sinB + ccy * cosB };
-    }
+// The bounding rectangle of `poly` when projected onto the axis pair at
+// `angle` -- turns a raw, amorphous Voronoi cell polygon into an actual
+// rectangle (walls/corners a viewer recognizes as a building) at
+// whichever angle the caller wants it to face (e.g. "the nearest road"),
+// not necessarily the cell's own area-minimizing orientation. Cheap at
+// the small vertex counts (4-8) these cell polygons actually have.
+function projectPolyAtAngle(poly, angle) {
+  const cos = Math.cos(-angle), sin = Math.sin(-angle);
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of poly) {
+    const rx = p.x * cos - p.y * sin;
+    const ry = p.x * sin + p.y * cos;
+    if (rx < minX) minX = rx; if (rx > maxX) maxX = rx;
+    if (ry < minY) minY = ry; if (ry > maxY) maxY = ry;
   }
-  return best;
+  const w = maxX - minX, h = maxY - minY;
+  const ccx = (minX + maxX) / 2, ccy = (minY + maxY) / 2;
+  const cosB = Math.cos(angle), sinB = Math.sin(angle);
+  return { area: w * h, w, h, angle, cx: ccx * cosB - ccy * sinB, cy: ccx * sinB + ccy * cosB };
 }
 
-// minAreaRect is, by construction, the SMALLEST rectangle that still fully
-// contains the source polygon -- for a regular-ish cell that's a close fit,
-// but for a skewed/elongated Voronoi cell the tightest bounding rectangle
-// can still be considerably bigger than the cell itself, with corners
-// reaching into neighboring cells' own territory. That was the direct cause
-// of buildings/POIs visually overlapping their neighbors: the fix isn't a
-// flat shrink (that just makes every building smaller), it's scaling
-// DOWN specifically the rectangles that are a poor fit for their actual
-// cell, leaving well-fitting ones (most of them) untouched. `targetRatio`
-// is roughly a hexagon's own area-to-bounding-box ratio -- cells at or
-// above that ratio are left alone.
+// A polygon's bounding rectangle at an arbitrary angle can be considerably
+// bigger than the cell itself -- e.g. a skewed/elongated Voronoi cell
+// projected at a road-facing angle far from its own natural axis -- with
+// corners reaching into neighboring cells' own territory. That was the
+// direct cause of buildings/POIs visually overlapping their neighbors:
+// the fix isn't a flat shrink (that just makes every building smaller),
+// it's scaling DOWN specifically the rectangles that are a poor fit for
+// their actual cell, leaving well-fitting ones (most of them) untouched.
+// `targetRatio` is roughly a hexagon's own area-to-bounding-box ratio --
+// cells at or above that ratio are left alone.
 function fitRectToPolygon(rect, polygonArea) {
   const rectArea = rect.w * rect.h;
   if (rectArea <= 0) return rect;
@@ -247,8 +245,14 @@ function buildLaneNetwork(rng, anchors, count, insideCastleFn) {
   }
   return lanes;
 }
-function distToPolylines(x, y, polylines) {
-  let best = Infinity;
+// `withAngle` (used by the road-facing building orientation below) also
+// returns the closest segment's own direction -- the road's local tangent
+// at the nearest point -- so a caller can orient a building to run
+// parallel/perpendicular to the road there, not just know how far away it
+// is. Default (no third arg) keeps returning a plain number, so every
+// existing eligibleForPlot call site is unaffected.
+function distToPolylines(x, y, polylines, withAngle) {
+  let best = Infinity, bestAngle = 0;
   for (const line of polylines) {
     for (let i = 0; i < line.length - 1; i++) {
       const x1 = line[i].x, y1 = line[i].y, x2 = line[i + 1].x, y2 = line[i + 1].y;
@@ -256,10 +260,11 @@ function distToPolylines(x, y, polylines) {
       const lenSq = dx * dx + dy * dy || 1;
       let t = ((x - x1) * dx + (y - y1) * dy) / lenSq;
       t = Math.max(0, Math.min(1, t));
-      best = Math.min(best, Math.hypot(x - (x1 + dx * t), y - (y1 + dy * t)));
+      const d = Math.hypot(x - (x1 + dx * t), y - (y1 + dy * t));
+      if (d < best) { best = d; bestAngle = Math.atan2(dy, dx); }
     }
   }
-  return best;
+  return withAngle ? { dist: best, angle: bestAngle } : best;
 }
 
 function renderSettlementMap(container, params) {
@@ -496,7 +501,7 @@ function renderSettlementMap(container, params) {
       branchSegments.push({ x1: ax, y1: ay, x2: ax + Math.cos(branchAngle) * branchLen, y2: ay + Math.sin(branchAngle) * branchLen });
     }
     const branchPolylines = branchSegments.map((s) => [{ x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }]);
-    function distToBranches(x, y) { return distToPolylines(x, y, branchPolylines); }
+    function distToBranches(x, y, withAngle) { return distToPolylines(x, y, branchPolylines, withAngle); }
 
     // Castle compound (city tier only): its own walled bailey with a
     // dominant keep, sited at the highest nearby ground when real backdrop
@@ -579,34 +584,42 @@ function renderSettlementMap(container, params) {
     }
     const laneCount = Math.max(6, Math.round(config.cellCount / 9));
     const laneNetwork = buildLaneNetwork(laneRng, laneAnchors, laneCount, insideCastle);
-    function distToLanes(x, y) { return distToPolylines(x, y, laneNetwork); }
+    function distToLanes(x, y, withAngle) { return distToPolylines(x, y, laneNetwork, withAngle); }
 
-    function distToSpokes(x, y) {
+    // `withAngle` returns the spoke's own direction (spokes run dead
+    // straight out from the hub at that fixed angle, so it IS the road's
+    // tangent at the closest point) -- used to orient a building's rect to
+    // run parallel/perpendicular to whichever road it's actually nearest.
+    function distToSpokes(x, y, withAngle) {
       const dx = x - hubX, dy = y - hubY;
       const dist = Math.hypot(dx, dy);
-      if (dist < 1) return 0;
+      if (dist < 1) return withAngle ? { dist: 0, angle: 0 } : 0;
       const angle = Math.atan2(dy, dx);
-      let best = Infinity;
+      let best = Infinity, bestAngle = 0;
       for (const spokeAngle of spokeAngles) {
         let diff = Math.abs(angle - spokeAngle) % (Math.PI * 2);
         if (diff > Math.PI) diff = Math.PI * 2 - diff;
-        best = Math.min(best, dist * Math.sin(diff));
+        const d = Math.abs(dist * Math.sin(diff));
+        if (d < best) { best = d; bestAngle = spokeAngle; }
       }
-      return Math.abs(best);
+      return withAngle ? { dist: best, angle: bestAngle } : best;
     }
     // Samples the wobbled ring radius at the query point's own angle -- a
     // cheap, sufficient local approximation. Skips a ring at angles inside
     // one of its own gaps, so buildings can legitimately span across a gap.
-    function distToRings(x, y) {
+    // `withAngle`'s tangent to a ring (a circle centered on the hub) at a
+    // given angle is perpendicular to the radius there, i.e. angle+90deg.
+    function distToRings(x, y, withAngle) {
       const dx = x - hubX, dy = y - hubY;
       const dist = Math.hypot(dx, dy);
       const angle = Math.atan2(dy, dx);
-      let best = Infinity;
+      let best = Infinity, bestAngle = 0;
       for (let i = 0; i < ringRadii.length; i++) {
         if (inRingGap(i, angle)) continue;
-        best = Math.min(best, Math.abs(dist - ringRadiusAt(i, angle)));
+        const d = Math.abs(dist - ringRadiusAt(i, angle));
+        if (d < best) { best = d; bestAngle = angle + Math.PI / 2; }
       }
-      return best;
+      return withAngle ? { dist: best, angle: bestAngle } : best;
     }
 
     const mesh = buildVoronoiMesh(meshRng, canvas.width, canvas.height, config.cellCount);
@@ -634,8 +647,9 @@ function renderSettlementMap(container, params) {
     // that hasn't been updated -- see views/map-overworld.js).
     await yieldToPaint();
     progress.update(0.3, 'Painting terrain…');
+    let terrainResult = null;
     if (sampleGuide) {
-      renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone: null, palette: theme.overworld });
+      terrainResult = renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone: null, palette: theme.overworld });
     } else {
       ctx.fillStyle = palette.ground;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -654,6 +668,45 @@ function renderSettlementMap(container, params) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
+    // River through the settlement: renderTerrainPatch's own river chains
+    // (views/map-detail.js, additive `riverChains` return field), clipped
+    // to the portion actually inside this town's wobbled boundary and
+    // re-rendered as a water-toned organic ribbon now that the opaque
+    // ground re-fill above would otherwise have paved right over it.
+    // `distToRiver`/`riverBuildMargin` (used by eligibleForPlot further
+    // down) keep buildings out of the channel; bridges are drawn once the
+    // street network below has been laid out, at each street/river
+    // crossing.
+    let clippedRiverChains = [];
+    let riverBuildMargin = 0;
+    if (terrainResult && terrainResult.riverChains && terrainResult.riverChains.length) {
+      const boundaryPath2D = new Path2D();
+      boundaryPath2D.moveTo(townBoundaryLoop[0].x, townBoundaryLoop[0].y);
+      for (let i = 1; i < townBoundaryLoop.length; i++) boundaryPath2D.lineTo(townBoundaryLoop[i].x, townBoundaryLoop[i].y);
+      boundaryPath2D.closePath();
+      const isInsideBoundary = (x, y) => ctx.isPointInPath(boundaryPath2D, x, y);
+      const riverRng = mulberry32(seed + 232323);
+      for (const river of terrainResult.riverChains) {
+        // Keep the longest contiguous run of points actually inside the
+        // boundary -- a real river's total path is almost always far
+        // longer than the town itself, so most of a chain sits outside it.
+        const runs = [];
+        let current = null;
+        for (const p of river.points) {
+          if (isInsideBoundary(p.x, p.y)) { if (!current) current = []; current.push(p); }
+          else if (current) { runs.push(current); current = null; }
+        }
+        if (current) runs.push(current);
+        if (!runs.length) continue;
+        runs.sort((a, b) => b.length - a.length);
+        if (runs[0].length < 2) continue;
+        const width = Math.min(26, streetWidth * (1.4 + Math.sqrt(river.maxFlow / (terrainResult.riverThreshold || 1)) * 0.6));
+        clippedRiverChains.push({ points: runs[0], width });
+        riverBuildMargin = Math.max(riverBuildMargin, width / 2 + 4);
+        strokeOrganicRoad(ctx, runs[0], { color: theme.overworld.river, edgeColor: palette.ink, width, rng: riverRng, surface: 'water' });
+      }
+    }
+
     // Street network: spokes radiating from the hub (uneven length),
     // wobbled concentric rings around the hub (broken into arcs by their
     // own gaps), organic branch stubs, and the dense secondary-lane maze.
@@ -662,6 +715,12 @@ function renderSettlementMap(container, params) {
     // (surface:'dirt', wider wobble), town/city a firmer paved-street look
     // (surface:'stone').
     const mainSurface = tierKey === 'village' ? 'dirt' : 'stone';
+    // Collected alongside the actual drawing below (not re-derived
+    // afterward) so the river-crossing bridge pass at the end of this
+    // block can test the exact same primary-street geometry against each
+    // river chain, without a second, potentially-drifting copy of the
+    // spoke/ring/branch math.
+    const bridgeRoadSegments = [];
     for (let si = 0; si < spokeAngles.length; si++) {
       const angle = spokeAngles[si];
       const len = effectiveR(angle) * spokeLengthFrac[si];
@@ -669,6 +728,7 @@ function renderSettlementMap(container, params) {
         { x: hubX + Math.cos(angle) * plazaR, y: hubY + Math.sin(angle) * plazaR },
         { x: hubX + Math.cos(angle) * len, y: hubY + Math.sin(angle) * len },
       ];
+      bridgeRoadSegments.push({ a: pts[0], b: pts[1] });
       strokeOrganicRoad(ctx, pts, { color: palette.street, edgeColor: palette.ink, width: streetWidth, rng: roadRng, surface: mainSurface });
     }
     const ringSegments = 96;
@@ -682,12 +742,15 @@ function renderSettlementMap(container, params) {
           continue;
         }
         const r = ringRadiusAt(i, angle);
-        seg.push({ x: hubX + Math.cos(angle) * r, y: hubY + Math.sin(angle) * r });
+        const pt = { x: hubX + Math.cos(angle) * r, y: hubY + Math.sin(angle) * r };
+        if (seg.length) bridgeRoadSegments.push({ a: seg[seg.length - 1], b: pt });
+        seg.push(pt);
       }
       if (seg.length > 1) strokeOrganicRoad(ctx, seg, { color: palette.street, edgeColor: palette.ink, width: streetWidth, rng: roadRng, surface: mainSurface });
     }
     const branchWidth = Math.max(6, streetWidth * 0.6);
     for (const seg of branchSegments) {
+      bridgeRoadSegments.push({ a: { x: seg.x1, y: seg.y1 }, b: { x: seg.x2, y: seg.y2 } });
       strokeOrganicRoad(ctx, [{ x: seg.x1, y: seg.y1 }, { x: seg.x2, y: seg.y2 }], { color: palette.street, edgeColor: palette.ink, width: branchWidth, rng: roadRng, surface: mainSurface });
     }
     const laneWidth = Math.max(3, streetWidth * 0.32);
@@ -697,6 +760,53 @@ function renderSettlementMap(container, params) {
       strokeOrganicRoad(ctx, line, { color: palette.street, edgeColor: palette.ink, width: laneWidth, rng: roadRng, surface: 'dirt' });
     }
     ctx.restore();
+
+    // Bridges: a short perpendicular deck (reusing palette.wall, the same
+    // "small fixed structure" convention the wall's own gate-ticks and the
+    // market well use) at every point a primary street segment actually
+    // crosses the river, found via straight-line segment intersection
+    // against each clipped river chain's own segments. A 14px proximity
+    // dedupe collapses near-duplicate hits from adjacent ring/spoke
+    // segments meeting at almost the same point.
+    if (clippedRiverChains.length) {
+      const bridgesPlaced = [];
+      function segIntersect(p1, p2, p3, p4) {
+        const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
+        const d2x = p4.x - p3.x, d2y = p4.y - p3.y;
+        const denom = d1x * d2y - d1y * d2x;
+        if (Math.abs(denom) < 1e-9) return null;
+        const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+        const u = ((p3.x - p1.x) * d1y - (p3.y - p1.y) * d1x) / denom;
+        if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+        return { x: p1.x + d1x * t, y: p1.y + d1y * t, roadAngle: Math.atan2(d1y, d1x) };
+      }
+      for (const river of clippedRiverChains) {
+        for (let i = 0; i < river.points.length - 1; i++) {
+          const p1 = river.points[i], p2 = river.points[i + 1];
+          for (const road of bridgeRoadSegments) {
+            const hit = segIntersect(p1, p2, road.a, road.b);
+            if (!hit) continue;
+            if (bridgesPlaced.some((b) => Math.hypot(b.x - hit.x, b.y - hit.y) < 14)) continue;
+            bridgesPlaced.push(hit);
+            const deckLen = river.width + 8, deckW = Math.max(4, streetWidth * 0.6);
+            ctx.save();
+            ctx.translate(hit.x, hit.y);
+            ctx.rotate(hit.roadAngle);
+            ctx.fillStyle = palette.wall;
+            ctx.fillRect(-deckLen / 2, -deckW / 2, deckLen, deckW);
+            ctx.strokeStyle = palette.ink;
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = 0.6;
+            ctx.beginPath();
+            ctx.moveTo(-deckLen / 2, -deckW / 2); ctx.lineTo(deckLen / 2, -deckW / 2);
+            ctx.moveTo(-deckLen / 2, deckW / 2); ctx.lineTo(deckLen / 2, deckW / 2);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+            ctx.restore();
+          }
+        }
+      }
+    }
 
     await yieldToPaint();
     progress.update(0.5, 'Placing buildings…');
@@ -725,6 +835,19 @@ function renderSettlementMap(container, params) {
         a += p1.x * p2.y - p2.x * p1.y;
       }
       return Math.abs(a) / 2;
+    }
+    // The direction a building at (x, y) should face: the road tangent at
+    // whichever of the four street/lane networks actually sits nearest,
+    // not the building's own Voronoi-cell edge angle (minAreaRect's angle
+    // is a geometry artifact of that cell's shape, unrelated to where the
+    // street actually runs). A small per-building jitter keeps a long
+    // straight run of buildings from all facing EXACTLY the same degree,
+    // which reads as suspiciously mechanical next to a real street.
+    function nearestRoadAngle(x, y, rng) {
+      const candidates = [distToSpokes(x, y, true), distToRings(x, y, true), distToBranches(x, y, true), distToLanes(x, y, true)];
+      let nearest = candidates[0];
+      for (const c of candidates) if (c.dist < nearest.dist) nearest = c;
+      return nearest.angle + (rng() - 0.5) * 0.2;
     }
     // Boundary containment (dist/eR) is relative to the town's own center
     // (cx, cy) -- that's what the wobbled silhouette is actually defined
@@ -756,6 +879,10 @@ function renderSettlementMap(container, params) {
       if (distToRings(cell.x, cell.y) < streetWidth / 2) return null;
       if (distToBranches(cell.x, cell.y) < streetWidth * 0.35) return null;
       if (distToLanes(cell.x, cell.y) < streetWidth * 0.22) return null;
+      // Composes with (doesn't replace) the sea-level rejection above --
+      // a building can't sit in the river channel either, when this town
+      // has one running through it.
+      if (clippedRiverChains.length && distToPolylines(cell.x, cell.y, clippedRiverChains.map((r) => r.points)) < riverBuildMargin) return null;
       if (cell.polygon.length < 3) return null;
       const frac = Math.max(0, Math.min(1, (distFromHub - plazaR) / Math.max(1, R - plazaR)));
       return { angleFromCenter, frac };
@@ -797,52 +924,100 @@ function renderSettlementMap(container, params) {
       poiPlaced.push({ cell: chosen, poiKey, poiType, displayLabel });
     }
 
-    // Ordinary buildings: tiered variety (hovel/house/manor) instead of one
-    // flat color/shrink range -- weighted per settlement tier, further
-    // biased toward manor near the hub and hovel near the edge (wealth/
-    // density radiating from the market, the classic historical pattern),
-    // with fill color lerping between two hand-picked-per-theme palette
-    // endpoints. Drawn as each cell's own oriented bounding rectangle
-    // (minAreaRect), not its raw polygon.
-    const buildingTiers = BUILDING_TIERS[tierKey] || BUILDING_TIERS.village;
-    for (const cell of mesh.cells) {
-      if (claimedCellIdx.has(cell.index)) continue;
-      const info = eligibleForPlot(cell);
-      if (!info) continue;
-      const distFrac = info.frac;
-
-      const weights = buildingTiers.map((t) => t.weight);
-      const manorIdx = buildingTiers.findIndex((t) => t.key === 'manor');
-      const hovelIdx = buildingTiers.findIndex((t) => t.key === 'hovel');
-      if (manorIdx >= 0) weights[manorIdx] *= (1 - distFrac) * 1.6 + 0.2;
-      if (hovelIdx >= 0) weights[hovelIdx] *= distFrac * 1.6 + 0.2;
-      const totalW = weights.reduce((a, b) => a + b, 0);
-      let roll = buildingRng() * totalW, tier = buildingTiers[buildingTiers.length - 1];
-      for (let i = 0; i < buildingTiers.length; i++) {
-        if (roll < weights[i]) { tier = buildingTiers[i]; break; }
-        roll -= weights[i];
-      }
-      const [minS, maxS] = tier.shrink;
-      const shrink = minS + buildingRng() * (maxS - minS);
-
-      const rect = fitRectToPolygon(minAreaRect(cell.polygon), cellArea(cell));
+    // Ordinary buildings. Every building faces its nearest road
+    // (nearestRoadAngle), not minAreaRect's own cell-geometry angle --
+    // re-derived via projectPolyAtAngle (not minAreaRect) before
+    // fitRectToPolygon, since that anti-overlap area-ratio check is only
+    // valid against the SAME angle the final rect is actually drawn at.
+    function placeOrdinaryBuilding(cell, shrink, baseColor) {
+      const targetAngle = nearestRoadAngle(cell.x, cell.y, buildingRng);
+      const rect = fitRectToPolygon(projectPolyAtAngle(cell.polygon, targetAngle), cellArea(cell));
       const maxDim = R * 0.3;
       let w = Math.max(4, rect.w * shrink), h = Math.max(4, rect.h * shrink);
       if (maxDim) { w = Math.min(w, maxDim); h = Math.min(h, maxDim); }
-      drawPictorialBuilding(ctx, rect, w, h, {
-        baseColor: lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac), ink: palette.ink, rng: buildingRng,
-      });
+      drawPictorialBuilding(ctx, rect, w, h, { baseColor, ink: palette.ink, rng: buildingRng });
+    }
+
+    if (tierKey === 'village') {
+      // A genuinely different, SPARSE algorithm -- not a smaller dense
+      // town. Real villages are a handful of loose building clusters with
+      // real gaps between them (confirmed directly against Phandalin/Red
+      // Larch reference maps), not one packed disc shrunk down. Pick
+      // well-separated seed cells (min-distance rejection against
+      // already-picked seeds), then claim each seed's own already-
+      // computed polygon neighbors (1-5 of them) as its cluster --
+      // everything else stays bare ground. Its own dedicated stream so
+      // reseeding the cluster layout never perturbs any other concern.
+      const clusterRng = mulberry32(seed + 121212);
+      const clusterPool = mesh.cells.filter((c) => !claimedCellIdx.has(c.index) && eligibleForPlot(c));
+      const seedCells = [];
+      const minSeedDist = R * 0.22;
+      const seedTarget = 8 + Math.floor(clusterRng() * 7); // 8-14
+      for (let tries = 0; tries < clusterPool.length * 3 && seedCells.length < seedTarget && clusterPool.length; tries++) {
+        const idx = Math.floor(clusterRng() * clusterPool.length);
+        const candidate = clusterPool[idx];
+        clusterPool.splice(idx, 1);
+        const tooClose = seedCells.some((s) => Math.hypot(s.x - candidate.x, s.y - candidate.y) < minSeedDist);
+        if (!tooClose) seedCells.push(candidate);
+      }
+      const cottageShrink = () => VILLAGE_COTTAGE_SHRINK[0] + clusterRng() * (VILLAGE_COTTAGE_SHRINK[1] - VILLAGE_COTTAGE_SHRINK[0]);
+      for (const seedCell of seedCells) {
+        if (claimedCellIdx.has(seedCell.index)) continue;
+        claimedCellIdx.add(seedCell.index);
+        placeOrdinaryBuilding(seedCell, cottageShrink(), palette.buildingPoor);
+        const claimCount = 1 + Math.floor(clusterRng() * 5);
+        let claimed = 0;
+        for (const nbrIdx of seedCell.neighbors) {
+          if (claimed >= claimCount) break;
+          const nbr = mesh.cells[nbrIdx];
+          if (!nbr || claimedCellIdx.has(nbr.index) || !eligibleForPlot(nbr)) continue;
+          claimedCellIdx.add(nbr.index);
+          placeOrdinaryBuilding(nbr, cottageShrink(), palette.buildingPoor);
+          claimed++;
+        }
+      }
+    } else {
+      // Town/city: tiered variety (hovel/house/manor) instead of one flat
+      // color/shrink range -- weighted per settlement tier, further biased
+      // toward manor near the hub and hovel near the edge (wealth/density
+      // radiating from the market, the classic historical pattern), with
+      // fill color lerping between two hand-picked-per-theme palette
+      // endpoints, on every eligible cell (a dense packed town).
+      const buildingTiers = BUILDING_TIERS[tierKey] || BUILDING_TIERS.village;
+      for (const cell of mesh.cells) {
+        if (claimedCellIdx.has(cell.index)) continue;
+        const info = eligibleForPlot(cell);
+        if (!info) continue;
+        const distFrac = info.frac;
+
+        const weights = buildingTiers.map((t) => t.weight);
+        const manorIdx = buildingTiers.findIndex((t) => t.key === 'manor');
+        const hovelIdx = buildingTiers.findIndex((t) => t.key === 'hovel');
+        if (manorIdx >= 0) weights[manorIdx] *= (1 - distFrac) * 1.6 + 0.2;
+        if (hovelIdx >= 0) weights[hovelIdx] *= distFrac * 1.6 + 0.2;
+        const totalW = weights.reduce((a, b) => a + b, 0);
+        let roll = buildingRng() * totalW, tier = buildingTiers[buildingTiers.length - 1];
+        for (let i = 0; i < buildingTiers.length; i++) {
+          if (roll < weights[i]) { tier = buildingTiers[i]; break; }
+          roll -= weights[i];
+        }
+        const [minS, maxS] = tier.shrink;
+        const shrink = minS + buildingRng() * (maxS - minS);
+        placeOrdinaryBuilding(cell, shrink, lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac));
+      }
     }
 
     // POI footprints, drawn after ordinary buildings so they read as
     // visually distinct: a wider shrink (bigger structure), a dedicated
-    // fill, an icon glyph, and a text label -- also an oriented rectangle.
-    // The temple gets its tier-specific size instead of the shared default.
+    // fill, an icon glyph, and a text label -- also road-facing, same
+    // reasoning as ordinary buildings above. The temple gets its
+    // tier-specific size instead of the shared default.
     ctx.font = `bold 10px ${OW_SERIF}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     for (const p of poiPlaced) {
-      const rect = fitRectToPolygon(minAreaRect(p.cell.polygon), cellArea(p.cell));
+      const poiTargetAngle = nearestRoadAngle(p.cell.x, p.cell.y, poiRng);
+      const rect = fitRectToPolygon(projectPolyAtAngle(p.cell.polygon, poiTargetAngle), cellArea(p.cell));
       const isTemple = p.poiKey === 'temple';
       const shrink = isTemple ? TEMPLE_BY_TIER[tierKey].shrink : 0.90;
       const maxDim = R * (isTemple ? TEMPLE_BY_TIER[tierKey].maxDimFrac : 0.35);

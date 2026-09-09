@@ -517,6 +517,13 @@ function renderTerrainPatch(ctx, canvas, opts) {
   ctx.strokeStyle = palette.river;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
+  // Collected (not just stroked-and-discarded) so a caller -- currently
+  // only views/map-settlement.js's river-through-town feature -- can clip
+  // these same chains against its own town boundary and re-render the
+  // crossing stretch as a proper street-crossing river instead of either
+  // ignoring it or letting the settlement's opaque ground re-fill pave
+  // over it.
+  const riverChains = [];
   for (let s = 0; s < n; s++) {
     if (flow[s] < riverThreshold || hasUpstream[s]) continue;
     const chain = [{ x: mesh.cells[s].x, y: mesh.cells[s].y }];
@@ -534,6 +541,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
     }
     if (chain.length < 2) continue;
     const smoothed = chaikinSmooth(chain, 2);
+    riverChains.push({ points: smoothed, maxFlow });
     ctx.lineWidth = Math.min(6, 1 + Math.sqrt(maxFlow / riverThreshold));
     ctx.beginPath();
     ctx.moveTo(smoothed[0].x, smoothed[0].y);
@@ -546,7 +554,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
     palette.lake
   );
 
-  return { mesh, cols, rows, cellW, cellH, heights, mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, hillsT, mountainsT, snowT, beachLoops, landLoops, wetlowlandOf, isGroundAt };
+  return { mesh, cols, rows, cellW, cellH, heights, mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, hillsT, mountainsT, snowT, beachLoops, landLoops, wetlowlandOf, isGroundAt, riverChains };
 }
 
 function renderDetailMap(container, params) {
