@@ -362,6 +362,33 @@ function renderSettlementMap(container, params) {
       const base = R * (1 + WOBBLE_AMP * wobble(theta)) * coastalMultiplier(theta);
       return Math.min(base, canvas.width / 2 * 0.97);
     }
+    // The wall is drawn as a coarse, faceted polygon (WALL_SEGMENTS below,
+    // far fewer than the 128-segment boundary silhouette) specifically so
+    // it reads as straight wall-runs rather than a smooth curve. But
+    // effectiveR's own wobble has real high-frequency content (harmonics up
+    // to 6 cycles per revolution) and the coastal recede can itself change
+    // sharply where a real coastline curves in tightly -- sampled at only
+    // 48 points, either one can create a single-vertex spike that reads as
+    // a wall jutting out into open water rather than a natural facet
+    // (confirmed directly: an actual seed showed a ~90px radius jump across
+    // one 7.5-degree wall segment). wallRAt box-averages effectiveR over a
+    // window matching one wall segment's own angular width before applying
+    // the 1.05 wall-vs-town-edge offset, damping anything narrower than a
+    // single facet while leaving the wall's real, larger-scale shape (and
+    // its coastal lean) intact. Used for every wall-radius lookup -- the
+    // main stroke, its corner towers, and the gate positions/ticks -- so
+    // none of them can land on a spike the others smoothed away.
+    const WALL_SEGMENTS = 48;
+    const wallSmoothHalfSpan = Math.PI / WALL_SEGMENTS;
+    function wallRAt(theta) {
+      const samples = 5;
+      let sum = 0;
+      for (let k = 0; k < samples; k++) {
+        const a = theta - wallSmoothHalfSpan + (2 * wallSmoothHalfSpan) * (k / (samples - 1));
+        sum += effectiveR(a);
+      }
+      return (sum / samples) * 1.05;
+    }
 
     // Street skeleton: spokes/rings/branches, all centered on the market
     // hub now rather than the town's own geometric center. Spoke angles
@@ -434,14 +461,35 @@ function renderSettlementMap(container, params) {
     if (tierKey === 'city') {
       let castleAngle;
       if (sampleGuide) {
-        let bestAngle = 0, bestH = -Infinity;
+        // Probe at TWO radii per angle (not one) and require both solidly
+        // above sea level before an angle even qualifies -- a single-point
+        // probe can land on a narrow headland/peninsula tip that reads as
+        // "high ground" while the town's own footprint there is a thin,
+        // unstable spit of land, which sited the castle half over open
+        // water in practice. Requiring the inner probe too means the whole
+        // area between it and the wall has to be real, solid ground.
+        let bestAngle = 0, bestH = -Infinity, qualified = false;
         const probes = 16;
+        const margin = 0.1;
         for (let i = 0; i < probes; i++) {
           const angle = (i / probes) * Math.PI * 2;
-          const r = effectiveR(angle) * 0.95;
-          const px = cx + Math.cos(angle) * r, py = cy + Math.sin(angle) * r;
-          const h = sampleGuide(px / canvas.width, py / canvas.height);
-          if (h > bestH) { bestH = h; bestAngle = angle; }
+          const outerR = effectiveR(angle);
+          const hOuter = sampleGuide((cx + Math.cos(angle) * outerR * 0.95) / canvas.width, (cy + Math.sin(angle) * outerR * 0.95) / canvas.height);
+          const hInner = sampleGuide((cx + Math.cos(angle) * outerR * 0.75) / canvas.width, (cy + Math.sin(angle) * outerR * 0.75) / canvas.height);
+          if (hOuter < sea + margin || hInner < sea + margin) continue;
+          qualified = true;
+          if (hOuter > bestH) { bestH = hOuter; bestAngle = angle; }
+        }
+        if (!qualified) {
+          // No angle had solid ground at both radii (a very water-heavy
+          // site) -- fall back to the single best outer-probe reading
+          // rather than leaving the castle unplaced.
+          for (let i = 0; i < probes; i++) {
+            const angle = (i / probes) * Math.PI * 2;
+            const r = effectiveR(angle) * 0.95;
+            const h = sampleGuide((cx + Math.cos(angle) * r) / canvas.width, (cy + Math.sin(angle) * r) / canvas.height);
+            if (h > bestH) { bestH = h; bestAngle = angle; }
+          }
         }
         castleAngle = bestAngle;
       } else {
@@ -855,16 +903,19 @@ function renderSettlementMap(container, params) {
       // boundary silhouette itself samples, so the wall reads as a
       // fortification with straight wall-runs and corners rather than a
       // rounded blob. Small towers at intervals reinforce that further.
-      const wallSegments = 48;
+      // Every radius lookup below goes through wallRAt (box-averaged, see
+      // its own comment) rather than effectiveR directly, so the main
+      // stroke, towers, and gate ticks all agree on the same de-spiked
+      // wall line.
       ctx.strokeStyle = palette.wall;
       ctx.lineWidth = Math.max(3, R * 0.022);
       ctx.lineCap = 'butt';
       ctx.lineJoin = 'miter';
       let penDown = false;
       ctx.beginPath();
-      for (let i = 0; i <= wallSegments; i++) {
-        const angle = (i / wallSegments) * Math.PI * 2;
-        const wallR = effectiveR(angle) * 1.05;
+      for (let i = 0; i <= WALL_SEGMENTS; i++) {
+        const angle = (i / WALL_SEGMENTS) * Math.PI * 2;
+        const wallR = wallRAt(angle);
         const x = cx + Math.cos(angle) * wallR, y = cy + Math.sin(angle) * wallR;
         if (nearGate(angle)) { penDown = false; continue; }
         if (!penDown) { ctx.moveTo(x, y); penDown = true; } else ctx.lineTo(x, y);
@@ -872,10 +923,10 @@ function renderSettlementMap(container, params) {
       ctx.stroke();
       const towerEvery = 6;
       const towerSize = Math.max(5, R * 0.03);
-      for (let i = 0; i < wallSegments; i += towerEvery) {
-        const angle = (i / wallSegments) * Math.PI * 2;
+      for (let i = 0; i < WALL_SEGMENTS; i += towerEvery) {
+        const angle = (i / WALL_SEGMENTS) * Math.PI * 2;
         if (nearGate(angle)) continue;
-        const wallR = effectiveR(angle) * 1.05;
+        const wallR = wallRAt(angle);
         const tx = cx + Math.cos(angle) * wallR, ty = cy + Math.sin(angle) * wallR;
         ctx.save();
         ctx.translate(tx, ty);
@@ -888,7 +939,7 @@ function renderSettlementMap(container, params) {
       // dungeon generator's door-tick convention.
       ctx.lineWidth = Math.max(2, R * 0.016);
       for (const g of gateAngles) {
-        const wallR = effectiveR(g) * 1.05;
+        const wallR = wallRAt(g);
         const gx = cx + Math.cos(g) * wallR, gy = cy + Math.sin(g) * wallR;
         const perp = g + Math.PI / 2;
         const half = streetWidth * 0.6;
