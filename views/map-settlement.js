@@ -54,22 +54,31 @@ const SETTLEMENT_TIER_CONFIG = {
 // Building-tier variety (footprint size band + relative weight), addressing
 // "buildings all look identical" -- weights differ per settlement tier
 // (village skews hovel-heavy, city skews manor-heavier) and are further
-// biased by distance-from-hub at draw time (see generate() below).
+// biased by distance-from-hub at draw time (see generate() below). Shrink
+// ranges are deliberately tight (buildings fill most of their own cell)
+// rather than the old 0.55-0.88 range that left a big gap around every
+// building on all sides -- real medieval buildings pack edge-to-edge in
+// dense blocks (confirmed against an actual historic town plan and a
+// medieval-city generator built on real urban-form research), with the
+// only real open space being the streets themselves. The thin gap that
+// remains between neighbors here comes from fitRectToPolygon's own
+// per-cell fit correction, not from a uniform shrink -- so it reads as a
+// party wall, not a plaza around every house.
 const BUILDING_TIERS = {
   village: [
-    { key: 'hovel', weight: 0.60, shrink: [0.55, 0.68] },
-    { key: 'house', weight: 0.38, shrink: [0.68, 0.80] },
-    { key: 'manor', weight: 0.02, shrink: [0.78, 0.88] },
+    { key: 'hovel', weight: 0.60, shrink: [0.80, 0.90] },
+    { key: 'house', weight: 0.38, shrink: [0.86, 0.94] },
+    { key: 'manor', weight: 0.02, shrink: [0.90, 0.97] },
   ],
   town: [
-    { key: 'hovel', weight: 0.40, shrink: [0.55, 0.68] },
-    { key: 'house', weight: 0.50, shrink: [0.68, 0.80] },
-    { key: 'manor', weight: 0.10, shrink: [0.78, 0.88] },
+    { key: 'hovel', weight: 0.40, shrink: [0.80, 0.90] },
+    { key: 'house', weight: 0.50, shrink: [0.86, 0.94] },
+    { key: 'manor', weight: 0.10, shrink: [0.90, 0.97] },
   ],
   city: [
-    { key: 'hovel', weight: 0.30, shrink: [0.55, 0.68] },
-    { key: 'house', weight: 0.52, shrink: [0.68, 0.80] },
-    { key: 'manor', weight: 0.18, shrink: [0.78, 0.88] },
+    { key: 'hovel', weight: 0.30, shrink: [0.80, 0.90] },
+    { key: 'house', weight: 0.52, shrink: [0.86, 0.94] },
+    { key: 'manor', weight: 0.18, shrink: [0.90, 0.97] },
   ],
 };
 
@@ -122,6 +131,27 @@ function minAreaRect(poly) {
   return best;
 }
 
+// minAreaRect is, by construction, the SMALLEST rectangle that still fully
+// contains the source polygon -- for a regular-ish cell that's a close fit,
+// but for a skewed/elongated Voronoi cell the tightest bounding rectangle
+// can still be considerably bigger than the cell itself, with corners
+// reaching into neighboring cells' own territory. That was the direct cause
+// of buildings/POIs visually overlapping their neighbors: the fix isn't a
+// flat shrink (that just makes every building smaller), it's scaling
+// DOWN specifically the rectangles that are a poor fit for their actual
+// cell, leaving well-fitting ones (most of them) untouched. `targetRatio`
+// is roughly a hexagon's own area-to-bounding-box ratio -- cells at or
+// above that ratio are left alone.
+function fitRectToPolygon(rect, polygonArea) {
+  const rectArea = rect.w * rect.h;
+  if (rectArea <= 0) return rect;
+  const targetRatio = 0.85;
+  const ratio = polygonArea / rectArea;
+  if (ratio >= targetRatio) return rect;
+  const scale = Math.sqrt(ratio / targetRatio);
+  return { ...rect, w: rect.w * scale, h: rect.h * scale };
+}
+
 // Draws a building/POI footprint as its oriented rectangle, shrunk for a
 // visible street gap -- floored at a small minimum so a sliver-thin cell
 // still reads as a real footprint, and capped at `maxDim` (when given) so
@@ -143,7 +173,10 @@ function drawFootprintRect(ctx, rect, shrink, fillStyle, maxDim, strokeStyle) {
   if (strokeStyle) {
     ctx.strokeStyle = strokeStyle;
     ctx.lineWidth = 1;
-    ctx.globalAlpha = 0.45;
+    // Alpha raised from the original 0.45 -- with buildings now packed
+    // much closer together, this outline is what reads as the party-wall
+    // line between neighbors, not just a soft edge on an isolated shape.
+    ctx.globalAlpha = 0.6;
     ctx.strokeRect(-w / 2, -h / 2, w, h);
     ctx.globalAlpha = 1;
   }
@@ -346,7 +379,14 @@ function renderSettlementMap(container, params) {
       const h = coastalHeights[i0] * (1 - t) + coastalHeights[i1] * t;
       const lo = sea - 0.05, hi = sea + 0.05;
       const s = Math.max(0, Math.min(1, (h - lo) / (hi - lo)));
-      return 0.7 + 0.3 * s; // water side recedes to 70% radius, land side unaffected
+      // Water side can recede to 45% of the base radius now (was 70%) --
+      // the original 30%-max reduction wasn't enough to keep the whole
+      // town on a genuinely narrow peninsula/spit, which a real seed showed
+      // sitting half over open water. The per-cell land check above is the
+      // real backstop for buildings specifically; this just keeps the
+      // wall/street geometry itself from reaching as far into the water in
+      // the first place.
+      return 0.45 + 0.55 * s;
     }
 
     // Organic boundary: a wobbled per-angle radius instead of a hard circle.
@@ -688,6 +728,16 @@ function renderSettlementMap(container, params) {
       const angleFromCenter = Math.atan2(dy, dx);
       const eR = effectiveR(angleFromCenter);
       if (distFromCenter > eR * 0.9) return null;
+      // The wobbled boundary is only ever an APPROXIMATION of the real
+      // coastline (a 16-probe average, smoothed) -- on a town sited on a
+      // peninsula narrower than the town's own radius, that approximation
+      // isn't tight enough on its own, and buildings/POIs could still land
+      // on what is actually open water in the real backdrop. When real
+      // terrain data is available, check it directly here rather than
+      // trusting the geometric approximation -- same "check the real data,
+      // not a smooth stand-in for it" fix already applied to the detail-map
+      // decoration bug earlier this project.
+      if (sampleGuide && sampleGuide(cell.x / canvas.width, cell.y / canvas.height) < sea + 0.04) return null;
       if (insideCastle(cell.x, cell.y)) return null;
       const hdx = cell.x - hubX, hdy = cell.y - hubY;
       const distFromHub = Math.hypot(hdx, hdy);
@@ -765,7 +815,7 @@ function renderSettlementMap(container, params) {
       const [minS, maxS] = tier.shrink;
       const shrink = minS + buildingRng() * (maxS - minS);
 
-      const rect = minAreaRect(cell.polygon);
+      const rect = fitRectToPolygon(minAreaRect(cell.polygon), cellArea(cell));
       const dims = drawFootprintRect(ctx, rect, shrink, lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac), R * 0.3, palette.ink);
       drawRoofRidge(ctx, rect, dims.w, dims.h, palette.ink);
     }
@@ -778,9 +828,9 @@ function renderSettlementMap(container, params) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     for (const p of poiPlaced) {
-      const rect = minAreaRect(p.cell.polygon);
+      const rect = fitRectToPolygon(minAreaRect(p.cell.polygon), cellArea(p.cell));
       const isTemple = p.poiKey === 'temple';
-      const shrink = isTemple ? TEMPLE_BY_TIER[tierKey].shrink : 0.85;
+      const shrink = isTemple ? TEMPLE_BY_TIER[tierKey].shrink : 0.90;
       const maxDim = R * (isTemple ? TEMPLE_BY_TIER[tierKey].maxDimFrac : 0.35);
       const dims = drawFootprintRect(ctx, rect, shrink, palette.poiFill, maxDim, palette.ink);
       if (isTemple) drawRoofRidge(ctx, rect, dims.w, dims.h, palette.ink);
