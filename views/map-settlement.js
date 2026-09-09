@@ -10,30 +10,31 @@
 // "Regenerate" control -- reseeding the layout independently of the
 // overworld settlement it belongs to would break that guarantee.
 //
-// Organic-town overhaul (account owner's own words: "just circular images,
-// with some geometric shapes within"): the boundary is now a
-// makeRadialWobbleSampler-wobbled silhouette (same mechanism the overworld
-// uses for its island coastline) instead of a hard circle, the radial
-// street skeleton is jittered/wobbled rather than perfectly even, named
-// POIs (lib/settlement-poi.js) sit alongside ordinary buildings, buildings
-// vary by tier/color, and the town renders directly in real backdrop
-// terrain (views/map-detail.js's renderTerrainPatch) rather than floating
-// on a flat fill -- unlike views/map-landmark.js's framed inset-card
-// treatment, a town sits directly in its landscape (walls and all), the
-// way a real regional map presents one, so there is no separate panel here.
-//
-// Second pass, after the first one still read as "a spoke-and-ring diagram
-// with a wobble filter" rather than a town: buildings are now drawn as
-// their own oriented bounding rectangle (minAreaRect below) instead of the
-// raw, amorphous Voronoi cell polygon -- the single biggest reason the
-// first pass didn't look like buildings. The street skeleton is broken up
-// further (uneven spoke lengths, gapped/arc-only rings instead of full
-// circles, a handful of organic branch stubs) instead of just jittered.
-// The boundary wobble amplitude more than doubled, collapsed to a single
-// visible edge (the wall itself, for walled tiers, instead of a redundant
-// second ink outline), and -- when real backdrop terrain is available --
-// recedes toward any nearby coastline instead of ignoring it, with the
-// harbor POI biased to actually site on that water-facing side.
+// Third pass, aimed specifically at real medieval town/city structure
+// rather than generic "organic blob" variety:
+//  1. The market hub is now offset from the town's own geometric center
+//     (hubX/hubY below) -- real medieval towns grew from a market street/
+//     square near a gate or river crossing, not from the mathematical
+//     middle of the eventual walled area. Streets, the plaza, and every
+//     POI-siting distance band are relative to this hub; only the outer
+//     boundary silhouette and the wall stay centered on the town's own
+//     (cx, cy), since that's what actually has to fit the fixed canvas.
+//  2. A dense secondary-lane layer (buildLaneNetwork) fills the gaps
+//     between the primary spoke/ring/branch streets with many short,
+//     winding, narrow lanes branching off each other and off the main
+//     network -- the maze of alleys a real town has, instead of only a
+//     handful of wide streets.
+//  3. The temple POI is resized and relabeled per tier (Chapel/Church/
+//     Cathedral) and sited tight against the hub -- the dominant building
+//     next to the market, not a same-sized icon scattered mid-town.
+//  4. City tier gets a genuinely distinct castle compound (buildCastle
+//     below): its own walled bailey with a dominant keep, sited at the
+//     town's highest nearby ground when real backdrop terrain is available
+//     (falls back to a random edge point otherwise), nestled into the town
+//     wall's own circuit rather than floating as an ordinary POI.
+//  5. The main wall is now a faceted polygon (fewer, longer straight
+//     segments) with small towers at intervals instead of a smooth curve --
+//     reads as a fortification, not a rounded blob.
 function deriveSettlementSeed(overworldSeed, idx) {
   const mixSeed = (overworldSeed ^ Math.imul(idx + 1, 0x9e3779b1)) >>> 0;
   const mixRng = mulberry32(mixSeed);
@@ -42,10 +43,8 @@ function deriveSettlementSeed(overworldSeed, idx) {
 
 // Tier drives scale and density, matching the tier already assigned on the
 // overworld map: village = small and sparse with no wall; town = denser
-// with a wall and a couple of gates; city = densest, walled, more gates.
-// Town/city radii were reduced from their original 230/300 to buy headroom
-// for the much larger boundary-wobble amplitude below (see effectiveR's
-// own comment for the worked-out margin math).
+// with a wall and a couple of gates; city = densest, walled, more gates,
+// and the only tier with its own castle compound.
 const SETTLEMENT_TIER_CONFIG = {
   village: { cellCount: 55, radius: 160, spokes: 4, rings: 1, wall: false, gates: 0 },
   town: { cellCount: 120, radius: 200, spokes: 6, rings: 2, wall: true, gates: 2 },
@@ -55,7 +54,7 @@ const SETTLEMENT_TIER_CONFIG = {
 // Building-tier variety (footprint size band + relative weight), addressing
 // "buildings all look identical" -- weights differ per settlement tier
 // (village skews hovel-heavy, city skews manor-heavier) and are further
-// biased by distance-from-plaza at draw time (see generate() below).
+// biased by distance-from-hub at draw time (see generate() below).
 const BUILDING_TIERS = {
   village: [
     { key: 'hovel', weight: 0.60, shrink: [0.55, 0.68] },
@@ -74,6 +73,15 @@ const BUILDING_TIERS = {
   ],
 };
 
+// Temple label/size by tier -- the church is the dominant building next to
+// a real medieval market, not a same-sized icon; city gets "Cathedral" and
+// the biggest footprint, village a modest "Chapel".
+const TEMPLE_BY_TIER = {
+  village: { label: 'Chapel', shrink: 0.90, maxDimFrac: 0.34 },
+  town: { label: 'Church', shrink: 0.92, maxDimFrac: 0.38 },
+  city: { label: 'Cathedral', shrink: 0.95, maxDimFrac: 0.42 },
+};
+
 function hexToRgb(hex) {
   const h = hex.replace('#', '');
   return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16) };
@@ -87,12 +95,9 @@ function lerpBuildingColor(hexA, hexB, t) {
 }
 
 // Minimum-area oriented bounding rectangle via rotating calipers over the
-// polygon's own edges -- the fix for "buildings don't look like buildings":
-// a raw Voronoi cell polygon has no straight walls or corners a viewer
-// recognizes as a structure, but the rectangle that best approximates its
-// footprint (oriented to whichever edge minimizes the bounding area, not
-// forced axis-aligned) does. Cheap at the small vertex counts (4-8) these
-// cell polygons actually have -- O(edges x vertices) per building.
+// polygon's own edges -- turns a raw, amorphous Voronoi cell polygon into
+// an actual rectangle (walls/corners a viewer recognizes as a building).
+// Cheap at the small vertex counts (4-8) these cell polygons actually have.
 function minAreaRect(poly) {
   let best = null;
   for (let i = 0; i < poly.length; i++) {
@@ -119,13 +124,10 @@ function minAreaRect(poly) {
 
 // Draws a building/POI footprint as its oriented rectangle, shrunk for a
 // visible street gap -- floored at a small minimum so a sliver-thin cell
-// still reads as a real footprint instead of vanishing to a hairline, and
-// capped at `maxDim` (when given) so an unusually large Voronoi cell (a
-// real occurrence at low cell counts, e.g. village tier's 55 cells over a
-// 160px radius) can't produce an oversized rectangle that visibly pokes
-// through the town boundary/wall -- centroid-distance eligibility alone
-// doesn't catch this, since the overflow comes from the rectangle's own
-// size, not from being sited too close to the edge.
+// still reads as a real footprint, and capped at `maxDim` (when given) so
+// an unusually large Voronoi cell (a real occurrence at low cell counts,
+// e.g. village tier's 55 cells over a 160px radius) can't produce an
+// oversized rectangle that visibly pokes through the town boundary/wall.
 function drawFootprintRect(ctx, rect, shrink, fillStyle, maxDim) {
   let w = Math.max(4, rect.w * shrink), h = Math.max(4, rect.h * shrink);
   if (maxDim) { w = Math.min(w, maxDim); h = Math.min(h, maxDim); }
@@ -135,6 +137,67 @@ function drawFootprintRect(ctx, rect, shrink, fillStyle, maxDim) {
   ctx.fillStyle = fillStyle;
   ctx.fillRect(-w / 2, -h / 2, w, h);
   ctx.restore();
+}
+
+// Point-in-oriented-rectangle test (rect = {cx, cy, angle}, half-extents
+// given separately since callers sometimes want a padded/unpadded test
+// against the same rect) -- used for the castle compound's exclusion zone.
+function pointInOrientedRect(px, py, rect, halfW, halfH) {
+  const dx = px - rect.cx, dy = py - rect.cy;
+  const cos = Math.cos(-rect.angle), sin = Math.sin(-rect.angle);
+  const lx = dx * cos - dy * sin, ly = dx * sin + dy * cos;
+  return Math.abs(lx) <= halfW && Math.abs(ly) <= halfH;
+}
+
+// Short, winding secondary-lane network -- the dense maze of narrow alleys
+// a real medieval town has, distinct from the handful of primary spokes/
+// rings/branches. Each lane is a multi-segment polyline anchored on an
+// existing street (or, with declining probability, on another already-
+// placed lane, so the network branches organically rather than every lane
+// radiating from the same few anchor points) and rejects any anchor that
+// would fall inside the castle compound.
+function buildLaneNetwork(rng, anchors, count, insideCastleFn) {
+  const lanes = [];
+  const pool = anchors.slice();
+  for (let i = 0; i < count && pool.length; i++) {
+    let start = null;
+    for (let tries = 0; tries < 5 && !start; tries++) {
+      const candidate = pool[Math.floor(rng() * pool.length)];
+      if (!insideCastleFn(candidate.x, candidate.y)) start = candidate;
+    }
+    if (!start) continue;
+    let angle = rng() * Math.PI * 2;
+    let x = start.x, y = start.y;
+    const segCount = 2 + Math.floor(rng() * 3);
+    const points = [{ x, y }];
+    for (let s = 0; s < segCount; s++) {
+      angle += (rng() - 0.5) * 1.1;
+      const len = 12 + rng() * 22;
+      x += Math.cos(angle) * len;
+      y += Math.sin(angle) * len;
+      if (insideCastleFn(x, y)) break;
+      points.push({ x, y });
+    }
+    if (points.length > 1) {
+      lanes.push(points);
+      if (rng() < 0.55) pool.push(points[points.length - 1]);
+    }
+  }
+  return lanes;
+}
+function distToPolylines(x, y, polylines) {
+  let best = Infinity;
+  for (const line of polylines) {
+    for (let i = 0; i < line.length - 1; i++) {
+      const x1 = line[i].x, y1 = line[i].y, x2 = line[i + 1].x, y2 = line[i + 1].y;
+      const dx = x2 - x1, dy = y2 - y1;
+      const lenSq = dx * dx + dy * dy || 1;
+      let t = ((x - x1) * dx + (y - y1) * dy) / lenSq;
+      t = Math.max(0, Math.min(1, t));
+      best = Math.min(best, Math.hypot(x - (x1 + dx * t), y - (y1 + dy * t)));
+    }
+  }
+  return best;
 }
 
 function renderSettlementMap(container, params) {
@@ -194,21 +257,38 @@ function renderSettlementMap(container, params) {
 
     // Dedicated rng streams, same isolation convention as the overworld/
     // dungeon generators: mesh geometry, wall-gate placement, building
-    // footprint variety, the organic boundary wobble, street jitter, and
-    // POI siting each get their own stream so toggling/regenerating any one
-    // of them never perturbs the others or the town layout itself when a
-    // theme switch redraws the same seed.
+    // footprint variety, the organic boundary wobble, street jitter, POI
+    // siting, the hub offset, the secondary-lane network, and the castle
+    // each get their own stream so toggling/regenerating any one of them
+    // never perturbs the others or the town layout itself when a theme
+    // switch redraws the same seed.
     const meshRng = mulberry32(seed + 77777);
     const wallRng = mulberry32(seed + 991);
     const buildingRng = mulberry32(seed + 55555);
     const boundaryRng = mulberry32(seed + 707070);
     const streetRng = mulberry32(seed + 606060);
     const poiRng = mulberry32(seed + 838383);
+    const hubRng = mulberry32(seed + 505050);
+    const laneRng = mulberry32(seed + 404040);
+    const castleRng = mulberry32(seed + 909090);
 
     const cx = canvas.width / 2, cy = canvas.height / 2;
     const R = config.radius;
     const streetWidth = Math.max(10, R * 0.045);
     const plazaR = R * 0.08;
+
+    // Market hub: offset from the town's own geometric center -- a real
+    // medieval town grew from a market street/square near a gate or river
+    // crossing, not from the mathematical middle of the eventual walled
+    // area. Every street, the plaza, and every POI/building distance band
+    // below is relative to this hub; only the outer boundary silhouette and
+    // the wall stay centered on (cx, cy), since that's what has to fit the
+    // fixed canvas. Offset capped modestly (12-25% of R) so the hub stays
+    // well clear of the wall in every direction.
+    const hubOffsetFrac = 0.12 + hubRng() * 0.13;
+    const hubAngle0 = hubRng() * Math.PI * 2;
+    const hubX = cx + Math.cos(hubAngle0) * R * hubOffsetFrac;
+    const hubY = cy + Math.sin(hubAngle0) * R * hubOffsetFrac;
 
     // Coastal shaping: when a real backdrop is available, probe a ring of
     // points around the town for water so the boundary can recede toward
@@ -240,18 +320,13 @@ function renderSettlementMap(container, params) {
       return 0.7 + 0.3 * s; // water side recedes to 70% radius, land side unaffected
     }
 
-    // Organic boundary: a wobbled per-angle radius instead of a hard circle
-    // -- the account owner's core complaint ("just circular images"). Same
-    // makeRadialWobbleSampler mechanism the overworld already uses for its
-    // island coastline, at a much larger amplitude than the first pass
-    // (0.18, up from 0.08) so it actually reads as an irregular shape
-    // rather than a lumpy circle. Clamped defensively so no tuning value
-    // can ever push the wobbled wall off the fixed 700x700 canvas -- worked
-    // out for city tier at this amplitude: R=260 -> max effectiveR ~307 ->
-    // wall radius ~322 + half line width ~2.9 = ~325px, vs. 350px
-    // half-canvas-extent -- 25px margin before the clamp even engages
-    // (town/city radii were reduced from their original 230/300 specifically
-    // to buy this headroom at the larger amplitude).
+    // Organic boundary: a wobbled per-angle radius instead of a hard circle.
+    // Same makeRadialWobbleSampler mechanism the overworld already uses for
+    // its island coastline. Clamped defensively so no tuning value can ever
+    // push the wobbled wall off the fixed 700x700 canvas -- worked out for
+    // city tier: R=260 -> max effectiveR ~307 -> wall radius ~322 + half
+    // line width ~2.9 = ~325px, vs. 350px half-canvas-extent -- 25px margin
+    // before the clamp even engages.
     const wobble = makeRadialWobbleSampler(boundaryRng, 5);
     const WOBBLE_AMP = 0.18;
     function effectiveR(theta) {
@@ -259,16 +334,11 @@ function renderSettlementMap(container, params) {
       return Math.min(base, canvas.width / 2 * 0.97);
     }
 
-    // Street skeleton: kept as the radial+ring shape (a full Voronoi-edge
-    // street derivation remains deliberately deferred, for real reasons --
-    // selecting a connected spanning edge subset, maintaining consistent
-    // width, real risk of a disconnected network), but broken up much more
-    // aggressively than the first pass: spoke angles are jittered far more
-    // (0.45 of half-spacing, up from 0.15), spokes vary in drawn length
-    // rather than all reaching the wall, and rings are arcs with a few
-    // random gaps rather than full circles -- plus a handful of short
-    // branch stubs off the main network for organic texture (T-junctions,
-    // dead ends) instead of a perfectly clean wheel.
+    // Street skeleton: spokes/rings/branches, all centered on the market
+    // hub now rather than the town's own geometric center. Spoke angles
+    // are jittered heavily (0.45 of half-spacing) and vary in drawn length
+    // rather than all reaching the wall; rings are gapped arcs, not full
+    // circles; branch stubs add organic texture off the main network.
     const spokeJitter = (Math.PI / config.spokes) * 0.45;
     const spokeAngles = [];
     const spokeLengthFrac = [];
@@ -286,7 +356,6 @@ function renderSettlementMap(container, params) {
     function ringRadiusAt(ringIdx, theta) {
       return ringRadii[ringIdx] * (1 + RING_WOBBLE_AMP * ringWobblers[ringIdx](theta));
     }
-
     const ringGapAngles = [];
     for (let i = 0; i < ringRadii.length; i++) {
       const gapCount = 2 + Math.floor(streetRng() * 3);
@@ -302,9 +371,6 @@ function renderSettlementMap(container, params) {
       });
     }
 
-    // Secondary branch streets: short stubs anchored on an existing spoke
-    // or ring, breaking the pure radial/concentric symmetry with a bit of
-    // organic texture rather than a perfectly clean wheel.
     const branchCount = Math.max(3, Math.floor(config.spokes * 1.2));
     const branchSegments = [];
     for (let b = 0; b < branchCount; b++) {
@@ -314,32 +380,85 @@ function renderSettlementMap(container, params) {
         const angle = spokeAngles[si];
         const t = 0.25 + streetRng() * 0.6;
         const r = effectiveR(angle) * spokeLengthFrac[si] * t;
-        ax = cx + Math.cos(angle) * r; ay = cy + Math.sin(angle) * r;
+        ax = hubX + Math.cos(angle) * r; ay = hubY + Math.sin(angle) * r;
       } else if (ringRadii.length) {
         const ri = Math.floor(streetRng() * ringRadii.length);
         const angle = streetRng() * Math.PI * 2;
         if (inRingGap(ri, angle)) continue;
         const r = ringRadiusAt(ri, angle);
-        ax = cx + Math.cos(angle) * r; ay = cy + Math.sin(angle) * r;
+        ax = hubX + Math.cos(angle) * r; ay = hubY + Math.sin(angle) * r;
       } else continue;
       const branchAngle = streetRng() * Math.PI * 2;
       const branchLen = R * (0.08 + streetRng() * 0.14);
       branchSegments.push({ x1: ax, y1: ay, x2: ax + Math.cos(branchAngle) * branchLen, y2: ay + Math.sin(branchAngle) * branchLen });
     }
-    function distToBranches(x, y) {
-      let best = Infinity;
-      for (const seg of branchSegments) {
-        const dx = seg.x2 - seg.x1, dy = seg.y2 - seg.y1;
-        const lenSq = dx * dx + dy * dy || 1;
-        let t = ((x - seg.x1) * dx + (y - seg.y1) * dy) / lenSq;
-        t = Math.max(0, Math.min(1, t));
-        best = Math.min(best, Math.hypot(x - (seg.x1 + dx * t), y - (seg.y1 + dy * t)));
+    const branchPolylines = branchSegments.map((s) => [{ x: s.x1, y: s.y1 }, { x: s.x2, y: s.y2 }]);
+    function distToBranches(x, y) { return distToPolylines(x, y, branchPolylines); }
+
+    // Castle compound (city tier only): its own walled bailey with a
+    // dominant keep, sited at the highest nearby ground when real backdrop
+    // terrain is available (probing the same way the coastal shaping does,
+    // just for elevation instead of water), otherwise a random point on the
+    // boundary. Nestled into the town wall's own circuit -- its outer edge
+    // sits close to the main wall rather than floating as an ordinary POI.
+    let castle = null;
+    if (tierKey === 'city') {
+      let castleAngle;
+      if (sampleGuide) {
+        let bestAngle = 0, bestH = -Infinity;
+        const probes = 16;
+        for (let i = 0; i < probes; i++) {
+          const angle = (i / probes) * Math.PI * 2;
+          const r = effectiveR(angle) * 0.95;
+          const px = cx + Math.cos(angle) * r, py = cy + Math.sin(angle) * r;
+          const h = sampleGuide(px / canvas.width, py / canvas.height);
+          if (h > bestH) { bestH = h; bestAngle = angle; }
+        }
+        castleAngle = bestAngle;
+      } else {
+        castleAngle = castleRng() * Math.PI * 2;
       }
-      return best;
+      const halfW = R * 0.14, halfH = R * 0.22;
+      const outerR = effectiveR(castleAngle);
+      const centerDist = outerR - halfW * 0.6;
+      castle = {
+        cx: cx + Math.cos(castleAngle) * centerDist,
+        cy: cy + Math.sin(castleAngle) * centerDist,
+        angle: castleAngle,
+        halfW, halfH,
+      };
+    }
+    function insideCastle(px, py) {
+      if (!castle) return false;
+      return pointInOrientedRect(px, py, castle, castle.halfW * 1.15, castle.halfH * 1.15);
     }
 
+    // Secondary lane network: anchored on points sampled along the primary
+    // spokes/rings/branches, then branching organically off itself -- the
+    // dense maze of narrow alleys a real town has, distinct from the
+    // handful of primary streets.
+    const laneAnchors = [];
+    for (let si = 0; si < spokeAngles.length; si++) {
+      const angle = spokeAngles[si];
+      for (const t of [0.35, 0.65, 0.9]) {
+        const r = effectiveR(angle) * spokeLengthFrac[si] * t;
+        laneAnchors.push({ x: hubX + Math.cos(angle) * r, y: hubY + Math.sin(angle) * r });
+      }
+    }
+    for (let ri = 0; ri < ringRadii.length; ri++) {
+      for (let s = 0; s < 8; s++) {
+        const angle = (s / 8) * Math.PI * 2;
+        if (inRingGap(ri, angle)) continue;
+        const r = ringRadiusAt(ri, angle);
+        laneAnchors.push({ x: hubX + Math.cos(angle) * r, y: hubY + Math.sin(angle) * r });
+      }
+    }
+    const laneCount = Math.max(6, Math.round(config.cellCount / 9));
+    const laneNetwork = buildLaneNetwork(laneRng, laneAnchors, laneCount, insideCastle);
+    function distToLanes(x, y) { return distToPolylines(x, y, laneNetwork); }
+
     function distToSpokes(x, y) {
-      const dx = x - cx, dy = y - cy;
+      const dx = x - hubX, dy = y - hubY;
       const dist = Math.hypot(dx, dy);
       if (dist < 1) return 0;
       const angle = Math.atan2(dy, dx);
@@ -352,13 +471,10 @@ function renderSettlementMap(container, params) {
       return Math.abs(best);
     }
     // Samples the wobbled ring radius at the query point's own angle -- a
-    // cheap, sufficient local approximation (it doesn't need the true
-    // nearest point on the curve, just "is this cell near a street here").
-    // Skips a ring at angles inside one of its own gaps, so buildings can
-    // legitimately span across a gap the same way they can't across an
-    // intact stretch of ring.
+    // cheap, sufficient local approximation. Skips a ring at angles inside
+    // one of its own gaps, so buildings can legitimately span across a gap.
     function distToRings(x, y) {
-      const dx = x - cx, dy = y - cy;
+      const dx = x - hubX, dy = y - hubY;
       const dist = Math.hypot(dx, dy);
       const angle = Math.atan2(dy, dx);
       let best = Infinity;
@@ -389,12 +505,9 @@ function renderSettlementMap(container, params) {
 
     // Surrounding terrain: reuses views/map-detail.js's renderTerrainPatch
     // exactly as views/map-landmark.js does, painting real backdrop terrain
-    // (biomes/rivers/coastline/hills matching the parent map's actual
-    // geography at this settlement) across the whole canvas. `zone` is
-    // intentionally omitted -- wild-zone recoloring doesn't belong under an
-    // ordinary town. Falls back to today's exact flat ground fill when no
-    // guide data was supplied (old bookmarked links, or a caller that
-    // hasn't been updated -- see views/map-overworld.js).
+    // across the whole canvas. Falls back to today's exact flat ground fill
+    // when no guide data was supplied (old bookmarked links, or a caller
+    // that hasn't been updated -- see views/map-overworld.js).
     if (sampleGuide) {
       renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone: null, palette: theme.overworld });
     } else {
@@ -415,9 +528,9 @@ function renderSettlementMap(container, params) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
-    // Street network: spokes radiating from the plaza (uneven length),
-    // wobbled concentric rings (broken into arcs by their own gaps), and
-    // a scatter of short organic branch stubs.
+    // Street network: spokes radiating from the hub (uneven length),
+    // wobbled concentric rings around the hub (broken into arcs by their
+    // own gaps), organic branch stubs, and the dense secondary-lane maze.
     ctx.strokeStyle = palette.street;
     ctx.lineWidth = streetWidth;
     ctx.lineCap = 'round';
@@ -426,8 +539,8 @@ function renderSettlementMap(container, params) {
       const angle = spokeAngles[si];
       const len = effectiveR(angle) * spokeLengthFrac[si];
       ctx.beginPath();
-      ctx.moveTo(cx + Math.cos(angle) * plazaR, cy + Math.sin(angle) * plazaR);
-      ctx.lineTo(cx + Math.cos(angle) * len, cy + Math.sin(angle) * len);
+      ctx.moveTo(hubX + Math.cos(angle) * plazaR, hubY + Math.sin(angle) * plazaR);
+      ctx.lineTo(hubX + Math.cos(angle) * len, hubY + Math.sin(angle) * len);
       ctx.stroke();
     }
     const ringSegments = 96;
@@ -438,7 +551,7 @@ function renderSettlementMap(container, params) {
         const angle = (s / ringSegments) * Math.PI * 2;
         if (inRingGap(i, angle)) { penDown = false; continue; }
         const r = ringRadiusAt(i, angle);
-        const x = cx + Math.cos(angle) * r, y = cy + Math.sin(angle) * r;
+        const x = hubX + Math.cos(angle) * r, y = hubY + Math.sin(angle) * r;
         if (!penDown) { ctx.moveTo(x, y); penDown = true; } else ctx.lineTo(x, y);
       }
       ctx.stroke();
@@ -450,10 +563,20 @@ function renderSettlementMap(container, params) {
       ctx.lineTo(seg.x2, seg.y2);
       ctx.stroke();
     }
+    ctx.lineWidth = Math.max(3, streetWidth * 0.32);
+    ctx.globalAlpha = 0.85;
+    for (const line of laneNetwork) {
+      ctx.beginPath();
+      ctx.moveTo(line[0].x, line[0].y);
+      for (let i = 1; i < line.length; i++) ctx.lineTo(line[i].x, line[i].y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
 
     // Gate angles computed before buildings/POIs so guard-post siting can
     // require proximity to one -- purely angular, no radius dependency, so
     // wobbling the boundary above can't perturb gate placement or width.
+    // Gates live on the town's own wall, so they stay center-relative.
     let gateAngles = [];
     if (config.wall) {
       for (let i = 0; i < config.gates; i++) {
@@ -476,30 +599,37 @@ function renderSettlementMap(container, params) {
       }
       return Math.abs(a) / 2;
     }
+    // Boundary containment (dist/eR) is relative to the town's own center
+    // (cx, cy) -- that's what the wobbled silhouette is actually defined
+    // against. Everything else (street avoidance, the hub-relative distance
+    // band `frac` used for both POI siting and building tier) is relative
+    // to the market hub, matching how a real town's density/wealth actually
+    // radiates from its market rather than from the walled area's centroid.
     function eligibleForPlot(cell) {
       const dx = cell.x - cx, dy = cell.y - cy;
-      const dist = Math.hypot(dx, dy);
-      const angle = Math.atan2(dy, dx);
-      const eR = effectiveR(angle);
-      // A cell's oriented-rectangle footprint (drawn from its centroid) can
-      // extend past its own centroid's distance from town center -- a 10%
-      // inset keeps rectangles from visibly poking through the boundary
-      // edge/wall, without needing per-corner containment math.
-      if (dist > eR * 0.9 || dist < plazaR) return null;
+      const distFromCenter = Math.hypot(dx, dy);
+      const angleFromCenter = Math.atan2(dy, dx);
+      const eR = effectiveR(angleFromCenter);
+      if (distFromCenter > eR * 0.9) return null;
+      if (insideCastle(cell.x, cell.y)) return null;
+      const hdx = cell.x - hubX, hdy = cell.y - hubY;
+      const distFromHub = Math.hypot(hdx, hdy);
+      if (distFromHub < plazaR) return null;
       if (distToSpokes(cell.x, cell.y) < streetWidth / 2) return null;
       if (distToRings(cell.x, cell.y) < streetWidth / 2) return null;
       if (distToBranches(cell.x, cell.y) < streetWidth * 0.35) return null;
+      if (distToLanes(cell.x, cell.y) < streetWidth * 0.22) return null;
       if (cell.polygon.length < 3) return null;
-      return { dist, angle, eR };
+      const frac = Math.max(0, Math.min(1, (distFromHub - plazaR) / Math.max(1, R - plazaR)));
+      return { angleFromCenter, frac };
     }
 
-    // Named districts/landmarks (lib/settlement-poi.js) -- addresses "no
-    // named districts or landmarks." Sited before ordinary buildings so
-    // their cells can be claimed and skipped by that loop. A coastalOnly
-    // POI (harbor) is additionally biased toward whichever candidates sit
-    // on the water-facing side (per the same coastalMultiplier probe used
+    // Named districts/landmarks (lib/settlement-poi.js) -- sited before
+    // ordinary buildings so their cells can be claimed and skipped by that
+    // loop. A coastalOnly POI (harbor) is additionally biased toward
+    // candidates on the water-facing side (per the same coastal probe used
     // for the boundary), falling back to the full candidate set if none
-    // qualify (no real backdrop, or a coast too far to have registered).
+    // qualify.
     const poiPlan = settlementPoiPlan(tierKey, coastal);
     const claimedCellIdx = new Set();
     const poiPlaced = [];
@@ -511,15 +641,14 @@ function renderSettlementMap(container, params) {
         if (claimedCellIdx.has(cell.index)) continue;
         const info = eligibleForPlot(cell);
         if (!info) continue;
-        const frac = (info.dist - plazaR) / Math.max(1, info.eR - plazaR);
-        if (frac < poiType.band[0] || frac > poiType.band[1]) continue;
-        if (poiType.nearGate && !nearAnyGate(info.angle)) continue;
-        candidates.push({ cell, angle: info.angle });
+        if (info.frac < poiType.band[0] || info.frac > poiType.band[1]) continue;
+        if (poiType.nearGate && !nearAnyGate(info.angleFromCenter)) continue;
+        candidates.push({ cell, angleFromCenter: info.angleFromCenter });
       }
       if (candidates.length === 0) continue;
       let pool = candidates;
       if (poiType.coastalOnly && coastalHeights) {
-        const waterFacing = candidates.filter((c) => coastalMultiplier(c.angle) < 0.9);
+        const waterFacing = candidates.filter((c) => coastalMultiplier(c.angleFromCenter) < 0.9);
         if (waterFacing.length) pool = waterFacing;
       }
       const cells = pool.map((c) => c.cell);
@@ -527,23 +656,23 @@ function renderSettlementMap(container, params) {
       const poolSize = Math.max(1, Math.ceil(cells.length * 0.35));
       const chosen = cells[Math.floor(poiRng() * poolSize)];
       claimedCellIdx.add(chosen.index);
-      poiPlaced.push({ cell: chosen, poiKey, poiType });
+      const displayLabel = poiKey === 'temple' ? TEMPLE_BY_TIER[tierKey].label : poiType.label;
+      poiPlaced.push({ cell: chosen, poiKey, poiType, displayLabel });
     }
 
     // Ordinary buildings: tiered variety (hovel/house/manor) instead of one
     // flat color/shrink range -- weighted per settlement tier, further
-    // biased toward manor near the plaza and hovel near the edge (the
-    // classic historical layout, reinforcing the plaza/wall distance
-    // banding this generator already conceptually uses), with fill color
-    // lerping between two hand-picked-per-theme palette endpoints. Drawn
-    // as each cell's own oriented bounding rectangle (minAreaRect), not
-    // its raw polygon -- the fix for buildings reading as amorphous blobs.
+    // biased toward manor near the hub and hovel near the edge (wealth/
+    // density radiating from the market, the classic historical pattern),
+    // with fill color lerping between two hand-picked-per-theme palette
+    // endpoints. Drawn as each cell's own oriented bounding rectangle
+    // (minAreaRect), not its raw polygon.
     const buildingTiers = BUILDING_TIERS[tierKey] || BUILDING_TIERS.village;
     for (const cell of mesh.cells) {
       if (claimedCellIdx.has(cell.index)) continue;
       const info = eligibleForPlot(cell);
       if (!info) continue;
-      const distFrac = Math.max(0, Math.min(1, (info.dist - plazaR) / Math.max(1, info.eR - plazaR)));
+      const distFrac = info.frac;
 
       const weights = buildingTiers.map((t) => t.weight);
       const manorIdx = buildingTiers.findIndex((t) => t.key === 'manor');
@@ -565,23 +694,68 @@ function renderSettlementMap(container, params) {
 
     // POI footprints, drawn after ordinary buildings so they read as
     // visually distinct: a wider shrink (bigger structure), a dedicated
-    // fill, an icon glyph, and a text label -- also an oriented rectangle,
-    // same as ordinary buildings.
+    // fill, an icon glyph, and a text label -- also an oriented rectangle.
+    // The temple gets its tier-specific size instead of the shared default.
     ctx.font = `bold 10px ${OW_SERIF}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     for (const p of poiPlaced) {
       const rect = minAreaRect(p.cell.polygon);
-      drawFootprintRect(ctx, rect, 0.85, palette.poiFill, R * 0.35);
+      const isTemple = p.poiKey === 'temple';
+      const shrink = isTemple ? TEMPLE_BY_TIER[tierKey].shrink : 0.85;
+      const maxDim = R * (isTemple ? TEMPLE_BY_TIER[tierKey].maxDimFrac : 0.35);
+      drawFootprintRect(ctx, rect, shrink, palette.poiFill, maxDim);
       drawSettlementPOIIcon(ctx, p.cell.x, p.cell.y - 8, p.poiType.iconKey, palette.ink);
       ctx.fillStyle = palette.ink;
-      ctx.fillText(p.poiType.label, p.cell.x, p.cell.y + 6);
+      ctx.fillText(p.displayLabel, p.cell.x, p.cell.y + 6);
     }
 
     ctx.fillStyle = palette.plaza;
     ctx.beginPath();
-    ctx.arc(cx, cy, plazaR, 0, Math.PI * 2);
+    ctx.arc(hubX, hubY, plazaR, 0, Math.PI * 2);
     ctx.fill();
+
+    // Castle compound: its own walled bailey (courtyard fill + a distinct
+    // toothed wall with corner towers) and a dominant keep -- drawn on top
+    // of everything else placed so far, still inside the terrain clip so
+    // it reads as sitting in the same ground as the rest of the town.
+    if (castle) {
+      const c = castle;
+      function baileyCorners(padW, padH) {
+        const cos = Math.cos(c.angle), sin = Math.sin(c.angle);
+        const local = [[-padW, -padH], [padW, -padH], [padW, padH], [-padW, padH]];
+        return local.map(([lx, ly]) => ({ x: c.cx + lx * cos - ly * sin, y: c.cy + lx * sin + ly * cos }));
+      }
+      const corners = baileyCorners(c.halfW, c.halfH);
+      ctx.fillStyle = palette.castleFill || palette.plaza;
+      ctx.beginPath();
+      ctx.moveTo(corners[0].x, corners[0].y);
+      for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = palette.wall;
+      ctx.lineWidth = Math.max(3, R * 0.02);
+      ctx.stroke();
+      // Corner towers -- small squares at each bailey corner, same
+      // fortified-silhouette language as the main wall's towers below.
+      const towerSize = Math.max(6, R * 0.045);
+      for (const corner of corners) {
+        ctx.fillStyle = palette.wall;
+        ctx.fillRect(corner.x - towerSize / 2, corner.y - towerSize / 2, towerSize, towerSize);
+      }
+      // The keep: a dominant rectangle inside the bailey, set back from the
+      // outer (town-wall-facing) edge toward the town side.
+      const keepHalfW = c.halfW * 0.42, keepHalfH = c.halfH * 0.55;
+      const inward = -c.halfW * 0.25; // pulled toward the town, away from the outer wall
+      const cosA = Math.cos(c.angle), sinA = Math.sin(c.angle);
+      const keepRect = { cx: c.cx + inward * cosA, cy: c.cy + inward * sinA, angle: c.angle, w: keepHalfW * 2, h: keepHalfH * 2 };
+      drawFootprintRect(ctx, keepRect, 1, palette.wall);
+      ctx.font = `bold 11px ${OW_SERIF}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = palette.ink;
+      ctx.fillText('Castle', c.cx, c.cy + c.halfH + 6);
+    }
 
     ctx.restore(); // undo the terrain clip (no-op if none was applied)
 
@@ -594,20 +768,39 @@ function renderSettlementMap(container, params) {
           return diff < gateHalfWidth;
         });
       }
+      // Faceted polygon, not a smooth curve -- far fewer segments than the
+      // boundary silhouette itself samples, so the wall reads as a
+      // fortification with straight wall-runs and corners rather than a
+      // rounded blob. Small towers at intervals reinforce that further.
+      const wallSegments = 48;
       ctx.strokeStyle = palette.wall;
       ctx.lineWidth = Math.max(3, R * 0.022);
       ctx.lineCap = 'butt';
-      const segments = 160;
+      ctx.lineJoin = 'miter';
       let penDown = false;
       ctx.beginPath();
-      for (let i = 0; i <= segments; i++) {
-        const angle = (i / segments) * Math.PI * 2;
+      for (let i = 0; i <= wallSegments; i++) {
+        const angle = (i / wallSegments) * Math.PI * 2;
         const wallR = effectiveR(angle) * 1.05;
         const x = cx + Math.cos(angle) * wallR, y = cy + Math.sin(angle) * wallR;
         if (nearGate(angle)) { penDown = false; continue; }
         if (!penDown) { ctx.moveTo(x, y); penDown = true; } else ctx.lineTo(x, y);
       }
       ctx.stroke();
+      const towerEvery = 6;
+      const towerSize = Math.max(5, R * 0.03);
+      for (let i = 0; i < wallSegments; i += towerEvery) {
+        const angle = (i / wallSegments) * Math.PI * 2;
+        if (nearGate(angle)) continue;
+        const wallR = effectiveR(angle) * 1.05;
+        const tx = cx + Math.cos(angle) * wallR, ty = cy + Math.sin(angle) * wallR;
+        ctx.save();
+        ctx.translate(tx, ty);
+        ctx.rotate(angle);
+        ctx.fillStyle = palette.wall;
+        ctx.fillRect(-towerSize / 2, -towerSize / 2, towerSize, towerSize);
+        ctx.restore();
+      }
       // Short perpendicular tick at each gate opening, matching the
       // dungeon generator's door-tick convention.
       ctx.lineWidth = Math.max(2, R * 0.016);
@@ -626,9 +819,7 @@ function renderSettlementMap(container, params) {
       // edge, so draw the soft double-stroke ink outline (wide low-alpha +
       // thin crisp, same technique views/map-detail.js uses for its beach
       // outline). Walled tiers skip this entirely: the wall stroke drawn
-      // above already reads as the town's edge, and stacking a second ink
-      // outline on top of it was what produced the "two nested circles"
-      // look the first pass had.
+      // above already reads as the town's edge.
       pathFromBoundary();
       ctx.strokeStyle = palette.ink;
       ctx.globalAlpha = 0.18;
@@ -644,9 +835,10 @@ function renderSettlementMap(container, params) {
     // export unit" convention). Regenerated every call so a theme switch
     // never leaves stale entries.
     const poiEl = container.querySelector('#st-poi');
-    if (poiPlaced.length) {
-      poiEl.innerHTML = `<h3>Notable locations</h3>` +
-        poiPlaced.map((p) => `<p>${p.poiType.label}</p>`).join('');
+    const panelEntries = poiPlaced.map((p) => `<p>${p.displayLabel}</p>`);
+    if (castle) panelEntries.push('<p>Castle</p>');
+    if (panelEntries.length) {
+      poiEl.innerHTML = `<h3>Notable locations</h3>` + panelEntries.join('');
     } else {
       poiEl.innerHTML = '';
     }
