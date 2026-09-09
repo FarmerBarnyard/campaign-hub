@@ -21,6 +21,19 @@
 // on a flat fill -- unlike views/map-landmark.js's framed inset-card
 // treatment, a town sits directly in its landscape (walls and all), the
 // way a real regional map presents one, so there is no separate panel here.
+//
+// Second pass, after the first one still read as "a spoke-and-ring diagram
+// with a wobble filter" rather than a town: buildings are now drawn as
+// their own oriented bounding rectangle (minAreaRect below) instead of the
+// raw, amorphous Voronoi cell polygon -- the single biggest reason the
+// first pass didn't look like buildings. The street skeleton is broken up
+// further (uneven spoke lengths, gapped/arc-only rings instead of full
+// circles, a handful of organic branch stubs) instead of just jittered.
+// The boundary wobble amplitude more than doubled, collapsed to a single
+// visible edge (the wall itself, for walled tiers, instead of a redundant
+// second ink outline), and -- when real backdrop terrain is available --
+// recedes toward any nearby coastline instead of ignoring it, with the
+// harbor POI biased to actually site on that water-facing side.
 function deriveSettlementSeed(overworldSeed, idx) {
   const mixSeed = (overworldSeed ^ Math.imul(idx + 1, 0x9e3779b1)) >>> 0;
   const mixRng = mulberry32(mixSeed);
@@ -30,10 +43,13 @@ function deriveSettlementSeed(overworldSeed, idx) {
 // Tier drives scale and density, matching the tier already assigned on the
 // overworld map: village = small and sparse with no wall; town = denser
 // with a wall and a couple of gates; city = densest, walled, more gates.
+// Town/city radii were reduced from their original 230/300 to buy headroom
+// for the much larger boundary-wobble amplitude below (see effectiveR's
+// own comment for the worked-out margin math).
 const SETTLEMENT_TIER_CONFIG = {
   village: { cellCount: 55, radius: 160, spokes: 4, rings: 1, wall: false, gates: 0 },
-  town: { cellCount: 120, radius: 230, spokes: 6, rings: 2, wall: true, gates: 2 },
-  city: { cellCount: 210, radius: 300, spokes: 8, rings: 3, wall: true, gates: 3 },
+  town: { cellCount: 120, radius: 200, spokes: 6, rings: 2, wall: true, gates: 2 },
+  city: { cellCount: 210, radius: 260, spokes: 8, rings: 3, wall: true, gates: 3 },
 };
 
 // Building-tier variety (footprint size band + relative weight), addressing
@@ -68,6 +84,57 @@ function lerpBuildingColor(hexA, hexB, t) {
   const g = Math.round(a.g + (b.g - a.g) * t);
   const bl = Math.round(a.b + (b.b - a.b) * t);
   return `rgb(${r},${g},${bl})`;
+}
+
+// Minimum-area oriented bounding rectangle via rotating calipers over the
+// polygon's own edges -- the fix for "buildings don't look like buildings":
+// a raw Voronoi cell polygon has no straight walls or corners a viewer
+// recognizes as a structure, but the rectangle that best approximates its
+// footprint (oriented to whichever edge minimizes the bounding area, not
+// forced axis-aligned) does. Cheap at the small vertex counts (4-8) these
+// cell polygons actually have -- O(edges x vertices) per building.
+function minAreaRect(poly) {
+  let best = null;
+  for (let i = 0; i < poly.length; i++) {
+    const p1 = poly[i], p2 = poly[(i + 1) % poly.length];
+    const edgeAngle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+    const cos = Math.cos(-edgeAngle), sin = Math.sin(-edgeAngle);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of poly) {
+      const rx = p.x * cos - p.y * sin;
+      const ry = p.x * sin + p.y * cos;
+      if (rx < minX) minX = rx; if (rx > maxX) maxX = rx;
+      if (ry < minY) minY = ry; if (ry > maxY) maxY = ry;
+    }
+    const w = maxX - minX, h = maxY - minY;
+    const area = w * h;
+    if (!best || area < best.area) {
+      const ccx = (minX + maxX) / 2, ccy = (minY + maxY) / 2;
+      const cosB = Math.cos(edgeAngle), sinB = Math.sin(edgeAngle);
+      best = { area, w, h, angle: edgeAngle, cx: ccx * cosB - ccy * sinB, cy: ccx * sinB + ccy * cosB };
+    }
+  }
+  return best;
+}
+
+// Draws a building/POI footprint as its oriented rectangle, shrunk for a
+// visible street gap -- floored at a small minimum so a sliver-thin cell
+// still reads as a real footprint instead of vanishing to a hairline, and
+// capped at `maxDim` (when given) so an unusually large Voronoi cell (a
+// real occurrence at low cell counts, e.g. village tier's 55 cells over a
+// 160px radius) can't produce an oversized rectangle that visibly pokes
+// through the town boundary/wall -- centroid-distance eligibility alone
+// doesn't catch this, since the overflow comes from the rectangle's own
+// size, not from being sited too close to the edge.
+function drawFootprintRect(ctx, rect, shrink, fillStyle, maxDim) {
+  let w = Math.max(4, rect.w * shrink), h = Math.max(4, rect.h * shrink);
+  if (maxDim) { w = Math.min(w, maxDim); h = Math.min(h, maxDim); }
+  ctx.save();
+  ctx.translate(rect.cx, rect.cy);
+  ctx.rotate(rect.angle);
+  ctx.fillStyle = fillStyle;
+  ctx.fillRect(-w / 2, -h / 2, w, h);
+  ctx.restore();
 }
 
 function renderSettlementMap(container, params) {
@@ -143,30 +210,71 @@ function renderSettlementMap(container, params) {
     const streetWidth = Math.max(10, R * 0.045);
     const plazaR = R * 0.08;
 
+    // Coastal shaping: when a real backdrop is available, probe a ring of
+    // points around the town for water so the boundary can recede toward
+    // an actual nearby shore instead of ignoring it entirely -- addresses
+    // "no surrounding context" more literally than just painting terrain
+    // behind an oblivious circle. Smoothstepped around sea level (not a
+    // hard cutoff) so the recession reads as a gradual coastal lean, not a
+    // faceted bite out of the boundary.
+    const coastalProbeCount = 16;
+    let coastalHeights = null;
+    if (sampleGuide) {
+      const probeR = R * 1.15;
+      coastalHeights = new Array(coastalProbeCount);
+      for (let i = 0; i < coastalProbeCount; i++) {
+        const angle = (i / coastalProbeCount) * Math.PI * 2;
+        const px = cx + Math.cos(angle) * probeR, py = cy + Math.sin(angle) * probeR;
+        coastalHeights[i] = sampleGuide(px / canvas.width, py / canvas.height);
+      }
+    }
+    function coastalMultiplier(theta) {
+      if (!coastalHeights) return 1;
+      const f = (((theta % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * coastalProbeCount;
+      const i0 = Math.floor(f) % coastalProbeCount;
+      const i1 = (i0 + 1) % coastalProbeCount;
+      const t = f - Math.floor(f);
+      const h = coastalHeights[i0] * (1 - t) + coastalHeights[i1] * t;
+      const lo = sea - 0.05, hi = sea + 0.05;
+      const s = Math.max(0, Math.min(1, (h - lo) / (hi - lo)));
+      return 0.7 + 0.3 * s; // water side recedes to 70% radius, land side unaffected
+    }
+
     // Organic boundary: a wobbled per-angle radius instead of a hard circle
     // -- the account owner's core complaint ("just circular images"). Same
     // makeRadialWobbleSampler mechanism the overworld already uses for its
-    // island coastline. Clamped defensively so no tuning value can ever push
-    // the wobbled wall off the fixed 700x700 canvas (worked out for city
-    // tier: R=300 -> max effectiveR 324 -> wall radius 340.2 + half line
-    // width ~3.3 = 343.5px, vs. 350px half-canvas-extent -- 6.5px margin
-    // before the clamp even engages).
+    // island coastline, at a much larger amplitude than the first pass
+    // (0.18, up from 0.08) so it actually reads as an irregular shape
+    // rather than a lumpy circle. Clamped defensively so no tuning value
+    // can ever push the wobbled wall off the fixed 700x700 canvas -- worked
+    // out for city tier at this amplitude: R=260 -> max effectiveR ~307 ->
+    // wall radius ~322 + half line width ~2.9 = ~325px, vs. 350px
+    // half-canvas-extent -- 25px margin before the clamp even engages
+    // (town/city radii were reduced from their original 230/300 specifically
+    // to buy this headroom at the larger amplitude).
     const wobble = makeRadialWobbleSampler(boundaryRng, 5);
-    const WOBBLE_AMP = 0.08;
+    const WOBBLE_AMP = 0.18;
     function effectiveR(theta) {
-      return Math.min(R * (1 + WOBBLE_AMP * wobble(theta)), canvas.width / 2 * 0.97);
+      const base = R * (1 + WOBBLE_AMP * wobble(theta)) * coastalMultiplier(theta);
+      return Math.min(base, canvas.width / 2 * 0.97);
     }
 
     // Street skeleton: kept as the radial+ring shape (a full Voronoi-edge
-    // street derivation was already deliberately deferred by this file's
-    // own prior roadmap note, for real reasons -- selecting a connected
-    // spanning edge subset, maintaining consistent width, real risk of a
-    // disconnected network), but jittered/wobbled so it no longer reads as
-    // a perfectly planned diagram.
-    const spokeJitter = (Math.PI / config.spokes) * 0.15;
+    // street derivation remains deliberately deferred, for real reasons --
+    // selecting a connected spanning edge subset, maintaining consistent
+    // width, real risk of a disconnected network), but broken up much more
+    // aggressively than the first pass: spoke angles are jittered far more
+    // (0.45 of half-spacing, up from 0.15), spokes vary in drawn length
+    // rather than all reaching the wall, and rings are arcs with a few
+    // random gaps rather than full circles -- plus a handful of short
+    // branch stubs off the main network for organic texture (T-junctions,
+    // dead ends) instead of a perfectly clean wheel.
+    const spokeJitter = (Math.PI / config.spokes) * 0.45;
     const spokeAngles = [];
+    const spokeLengthFrac = [];
     for (let i = 0; i < config.spokes; i++) {
       spokeAngles.push((i / config.spokes) * Math.PI * 2 + (streetRng() - 0.5) * 2 * spokeJitter);
+      spokeLengthFrac.push(0.55 + streetRng() * 0.45);
     }
     const ringRadii = [];
     const ringWobblers = [];
@@ -177,6 +285,57 @@ function renderSettlementMap(container, params) {
     const RING_WOBBLE_AMP = 0.07;
     function ringRadiusAt(ringIdx, theta) {
       return ringRadii[ringIdx] * (1 + RING_WOBBLE_AMP * ringWobblers[ringIdx](theta));
+    }
+
+    const ringGapAngles = [];
+    for (let i = 0; i < ringRadii.length; i++) {
+      const gapCount = 2 + Math.floor(streetRng() * 3);
+      const gaps = [];
+      for (let g = 0; g < gapCount; g++) gaps.push({ angle: streetRng() * Math.PI * 2, halfWidth: 0.12 + streetRng() * 0.15 });
+      ringGapAngles.push(gaps);
+    }
+    function inRingGap(ringIdx, angle) {
+      return ringGapAngles[ringIdx].some((g) => {
+        let diff = Math.abs(angle - g.angle) % (Math.PI * 2);
+        if (diff > Math.PI) diff = Math.PI * 2 - diff;
+        return diff < g.halfWidth;
+      });
+    }
+
+    // Secondary branch streets: short stubs anchored on an existing spoke
+    // or ring, breaking the pure radial/concentric symmetry with a bit of
+    // organic texture rather than a perfectly clean wheel.
+    const branchCount = Math.max(3, Math.floor(config.spokes * 1.2));
+    const branchSegments = [];
+    for (let b = 0; b < branchCount; b++) {
+      let ax, ay;
+      if (streetRng() < 0.6 && spokeAngles.length) {
+        const si = Math.floor(streetRng() * spokeAngles.length);
+        const angle = spokeAngles[si];
+        const t = 0.25 + streetRng() * 0.6;
+        const r = effectiveR(angle) * spokeLengthFrac[si] * t;
+        ax = cx + Math.cos(angle) * r; ay = cy + Math.sin(angle) * r;
+      } else if (ringRadii.length) {
+        const ri = Math.floor(streetRng() * ringRadii.length);
+        const angle = streetRng() * Math.PI * 2;
+        if (inRingGap(ri, angle)) continue;
+        const r = ringRadiusAt(ri, angle);
+        ax = cx + Math.cos(angle) * r; ay = cy + Math.sin(angle) * r;
+      } else continue;
+      const branchAngle = streetRng() * Math.PI * 2;
+      const branchLen = R * (0.08 + streetRng() * 0.14);
+      branchSegments.push({ x1: ax, y1: ay, x2: ax + Math.cos(branchAngle) * branchLen, y2: ay + Math.sin(branchAngle) * branchLen });
+    }
+    function distToBranches(x, y) {
+      let best = Infinity;
+      for (const seg of branchSegments) {
+        const dx = seg.x2 - seg.x1, dy = seg.y2 - seg.y1;
+        const lenSq = dx * dx + dy * dy || 1;
+        let t = ((x - seg.x1) * dx + (y - seg.y1) * dy) / lenSq;
+        t = Math.max(0, Math.min(1, t));
+        best = Math.min(best, Math.hypot(x - (seg.x1 + dx * t), y - (seg.y1 + dy * t)));
+      }
+      return best;
     }
 
     function distToSpokes(x, y) {
@@ -195,12 +354,18 @@ function renderSettlementMap(container, params) {
     // Samples the wobbled ring radius at the query point's own angle -- a
     // cheap, sufficient local approximation (it doesn't need the true
     // nearest point on the curve, just "is this cell near a street here").
+    // Skips a ring at angles inside one of its own gaps, so buildings can
+    // legitimately span across a gap the same way they can't across an
+    // intact stretch of ring.
     function distToRings(x, y) {
       const dx = x - cx, dy = y - cy;
       const dist = Math.hypot(dx, dy);
       const angle = Math.atan2(dy, dx);
       let best = Infinity;
-      for (let i = 0; i < ringRadii.length; i++) best = Math.min(best, Math.abs(dist - ringRadiusAt(i, angle)));
+      for (let i = 0; i < ringRadii.length; i++) {
+        if (inRingGap(i, angle)) continue;
+        best = Math.min(best, Math.abs(dist - ringRadiusAt(i, angle)));
+      }
       return best;
     }
 
@@ -250,28 +415,39 @@ function renderSettlementMap(container, params) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
-    // Street network: spokes radiating from the plaza plus wobbled
-    // concentric rings.
+    // Street network: spokes radiating from the plaza (uneven length),
+    // wobbled concentric rings (broken into arcs by their own gaps), and
+    // a scatter of short organic branch stubs.
     ctx.strokeStyle = palette.street;
     ctx.lineWidth = streetWidth;
     ctx.lineCap = 'round';
-    for (const angle of spokeAngles) {
+    ctx.lineJoin = 'round';
+    for (let si = 0; si < spokeAngles.length; si++) {
+      const angle = spokeAngles[si];
+      const len = effectiveR(angle) * spokeLengthFrac[si];
       ctx.beginPath();
       ctx.moveTo(cx + Math.cos(angle) * plazaR, cy + Math.sin(angle) * plazaR);
-      ctx.lineTo(cx + Math.cos(angle) * effectiveR(angle), cy + Math.sin(angle) * effectiveR(angle));
+      ctx.lineTo(cx + Math.cos(angle) * len, cy + Math.sin(angle) * len);
       ctx.stroke();
     }
-    ctx.lineJoin = 'round';
     const ringSegments = 96;
     for (let i = 0; i < ringRadii.length; i++) {
       ctx.beginPath();
+      let penDown = false;
       for (let s = 0; s <= ringSegments; s++) {
         const angle = (s / ringSegments) * Math.PI * 2;
+        if (inRingGap(i, angle)) { penDown = false; continue; }
         const r = ringRadiusAt(i, angle);
         const x = cx + Math.cos(angle) * r, y = cy + Math.sin(angle) * r;
-        if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        if (!penDown) { ctx.moveTo(x, y); penDown = true; } else ctx.lineTo(x, y);
       }
-      ctx.closePath();
+      ctx.stroke();
+    }
+    ctx.lineWidth = Math.max(6, streetWidth * 0.6);
+    for (const seg of branchSegments) {
+      ctx.beginPath();
+      ctx.moveTo(seg.x1, seg.y1);
+      ctx.lineTo(seg.x2, seg.y2);
       ctx.stroke();
     }
 
@@ -305,16 +481,25 @@ function renderSettlementMap(container, params) {
       const dist = Math.hypot(dx, dy);
       const angle = Math.atan2(dy, dx);
       const eR = effectiveR(angle);
-      if (dist > eR || dist < plazaR) return null;
+      // A cell's oriented-rectangle footprint (drawn from its centroid) can
+      // extend past its own centroid's distance from town center -- a 10%
+      // inset keeps rectangles from visibly poking through the boundary
+      // edge/wall, without needing per-corner containment math.
+      if (dist > eR * 0.9 || dist < plazaR) return null;
       if (distToSpokes(cell.x, cell.y) < streetWidth / 2) return null;
       if (distToRings(cell.x, cell.y) < streetWidth / 2) return null;
+      if (distToBranches(cell.x, cell.y) < streetWidth * 0.35) return null;
       if (cell.polygon.length < 3) return null;
       return { dist, angle, eR };
     }
 
     // Named districts/landmarks (lib/settlement-poi.js) -- addresses "no
     // named districts or landmarks." Sited before ordinary buildings so
-    // their cells can be claimed and skipped by that loop.
+    // their cells can be claimed and skipped by that loop. A coastalOnly
+    // POI (harbor) is additionally biased toward whichever candidates sit
+    // on the water-facing side (per the same coastalMultiplier probe used
+    // for the boundary), falling back to the full candidate set if none
+    // qualify (no real backdrop, or a coast too far to have registered).
     const poiPlan = settlementPoiPlan(tierKey, coastal);
     const claimedCellIdx = new Set();
     const poiPlaced = [];
@@ -329,12 +514,18 @@ function renderSettlementMap(container, params) {
         const frac = (info.dist - plazaR) / Math.max(1, info.eR - plazaR);
         if (frac < poiType.band[0] || frac > poiType.band[1]) continue;
         if (poiType.nearGate && !nearAnyGate(info.angle)) continue;
-        candidates.push(cell);
+        candidates.push({ cell, angle: info.angle });
       }
       if (candidates.length === 0) continue;
-      candidates.sort((a, b) => cellArea(b) - cellArea(a));
-      const poolSize = Math.max(1, Math.ceil(candidates.length * 0.35));
-      const chosen = candidates[Math.floor(poiRng() * poolSize)];
+      let pool = candidates;
+      if (poiType.coastalOnly && coastalHeights) {
+        const waterFacing = candidates.filter((c) => coastalMultiplier(c.angle) < 0.9);
+        if (waterFacing.length) pool = waterFacing;
+      }
+      const cells = pool.map((c) => c.cell);
+      cells.sort((a, b) => cellArea(b) - cellArea(a));
+      const poolSize = Math.max(1, Math.ceil(cells.length * 0.35));
+      const chosen = cells[Math.floor(poiRng() * poolSize)];
       claimedCellIdx.add(chosen.index);
       poiPlaced.push({ cell: chosen, poiKey, poiType });
     }
@@ -344,7 +535,9 @@ function renderSettlementMap(container, params) {
     // biased toward manor near the plaza and hovel near the edge (the
     // classic historical layout, reinforcing the plaza/wall distance
     // banding this generator already conceptually uses), with fill color
-    // lerping between two hand-picked-per-theme palette endpoints.
+    // lerping between two hand-picked-per-theme palette endpoints. Drawn
+    // as each cell's own oriented bounding rectangle (minAreaRect), not
+    // its raw polygon -- the fix for buildings reading as amorphous blobs.
     const buildingTiers = BUILDING_TIERS[tierKey] || BUILDING_TIERS.village;
     for (const cell of mesh.cells) {
       if (claimedCellIdx.has(cell.index)) continue;
@@ -366,38 +559,20 @@ function renderSettlementMap(container, params) {
       const [minS, maxS] = tier.shrink;
       const shrink = minS + buildingRng() * (maxS - minS);
 
-      const poly = cell.polygon;
-      ctx.fillStyle = lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac);
-      ctx.beginPath();
-      for (let i = 0; i < poly.length; i++) {
-        const p = poly[i];
-        const sx = cell.x + (p.x - cell.x) * shrink;
-        const sy = cell.y + (p.y - cell.y) * shrink;
-        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-      }
-      ctx.closePath();
-      ctx.fill();
+      const rect = minAreaRect(cell.polygon);
+      drawFootprintRect(ctx, rect, shrink, lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac), R * 0.3);
     }
 
     // POI footprints, drawn after ordinary buildings so they read as
     // visually distinct: a wider shrink (bigger structure), a dedicated
-    // fill, an icon glyph, and a text label.
+    // fill, an icon glyph, and a text label -- also an oriented rectangle,
+    // same as ordinary buildings.
     ctx.font = `bold 10px ${OW_SERIF}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     for (const p of poiPlaced) {
-      const poly = p.cell.polygon;
-      const shrink = 0.85;
-      ctx.fillStyle = palette.poiFill;
-      ctx.beginPath();
-      for (let i = 0; i < poly.length; i++) {
-        const pt = poly[i];
-        const sx = p.cell.x + (pt.x - p.cell.x) * shrink;
-        const sy = p.cell.y + (pt.y - p.cell.y) * shrink;
-        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-      }
-      ctx.closePath();
-      ctx.fill();
+      const rect = minAreaRect(p.cell.polygon);
+      drawFootprintRect(ctx, rect, 0.85, palette.poiFill, R * 0.35);
       drawSettlementPOIIcon(ctx, p.cell.x, p.cell.y - 8, p.poiType.iconKey, palette.ink);
       ctx.fillStyle = palette.ink;
       ctx.fillText(p.poiType.label, p.cell.x, p.cell.y + 6);
@@ -446,20 +621,23 @@ function renderSettlementMap(container, params) {
         ctx.lineTo(gx + Math.cos(perp) * half, gy + Math.sin(perp) * half);
         ctx.stroke();
       }
+    } else {
+      // No wall (village) -- the wobbled boundary itself needs a visible
+      // edge, so draw the soft double-stroke ink outline (wide low-alpha +
+      // thin crisp, same technique views/map-detail.js uses for its beach
+      // outline). Walled tiers skip this entirely: the wall stroke drawn
+      // above already reads as the town's edge, and stacking a second ink
+      // outline on top of it was what produced the "two nested circles"
+      // look the first pass had.
+      pathFromBoundary();
+      ctx.strokeStyle = palette.ink;
+      ctx.globalAlpha = 0.18;
+      ctx.lineWidth = 7;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
     }
-
-    // Soft double-stroke ink edge around the wobbled boundary (wide low-
-    // alpha + thin crisp, same technique views/map-detail.js already uses
-    // for its beach outline) so the organic silhouette reads as a
-    // deliberate edge against the backdrop, not just an implicit clip.
-    pathFromBoundary();
-    ctx.strokeStyle = palette.ink;
-    ctx.globalAlpha = 0.18;
-    ctx.lineWidth = 7;
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
 
     // Notable-locations panel: plain DOM text below the canvas, not part of
     // the PNG export (matches every other generator's "canvas is the
