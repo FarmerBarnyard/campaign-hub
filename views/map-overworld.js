@@ -1435,7 +1435,19 @@ function renderOverworldMap(container) {
       }
     }
     candidates.sort((a, b) => b.score - a.score);
-    const minDist = Math.max(canvas.width, canvas.height) / (settleCount + 1) * 0.6;
+    // Floored at 28px: the raw formula scales minDist DOWN as settleCount
+    // goes up (more requested settlements on a fixed canvas necessarily
+    // means tighter spacing), which is reasonable for the marker points
+    // themselves but, at higher settlement counts, could shrink well below
+    // the size of the icons/labels actually being drawn there -- confirmed
+    // directly from a real map showing a dense pile of overlapping town
+    // icons and names in one region. The floor keeps icons visually
+    // distinct from their immediate neighbors regardless of how many
+    // settlements were requested; it does NOT guarantee label text (which
+    // varies in width per name) won't still collide -- that's handled
+    // separately at draw time below, since it can't be solved by point
+    // spacing alone.
+    const minDist = Math.max(28, Math.max(canvas.width, canvas.height) / (settleCount + 1) * 0.6);
     const settlements = [];
     for (const c of candidates) {
       if (settlements.length >= settleCount) break;
@@ -2014,7 +2026,30 @@ function renderOverworldMap(container) {
         ctx.arc(px, py, r + 3, 0, Math.PI * 2);
         ctx.stroke();
       }
+    }
+
+    // Labels: a separate pass, city-before-town-before-village, with simple
+    // bounding-box collision avoidance -- minDist above only spaces marker
+    // POINTS, which says nothing about how wide a rendered name actually
+    // is, so nearby settlements' labels could still visibly pile into an
+    // illegible cluster even with icons properly spaced (confirmed
+    // directly from a real map). Every icon above always draws regardless;
+    // only the text label is ever skipped, and only when it would collide
+    // with a higher-priority label already placed, so a crowded region
+    // still shows where every settlement is, just not all of their names.
+    const labelPriority = { city: 0, town: 1, village: 2 };
+    const sortedForLabels = settlements.slice().sort((a, b) => labelPriority[a.tier] - labelPriority[b.tier]);
+    const placedLabelBoxes = [];
+    for (const s of sortedForLabels) {
+      const px = s.x, py = s.y;
+      const r = OW_TIER_RADIUS[s.tier];
       ctx.font = OW_TIER_FONT[s.tier];
+      const textWidth = ctx.measureText(s.name).width;
+      const boxX1 = px - textWidth / 2 - 2, boxX2 = px + textWidth / 2 + 2;
+      const boxY1 = py + r + 3, boxY2 = boxY1 + 11;
+      const overlaps = placedLabelBoxes.some((b) => boxX1 < b.x2 && boxX2 > b.x1 && boxY1 < b.y2 && boxY2 > b.y1);
+      if (overlaps) continue;
+      placedLabelBoxes.push({ x1: boxX1, y1: boxY1, x2: boxX2, y2: boxY2 });
       // refBiome, not the live-biased biome -- matches convention #3
       // (settlement-adjacent visuals stay fixed under the live sliders).
       ctx.fillStyle = labelColorFor(cellData[s.index].refBiome, palette);
