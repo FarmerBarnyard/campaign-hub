@@ -664,8 +664,21 @@ function renderSettlementMap(container, params) {
     if (sampleGuide) {
       pathFromBoundary();
       ctx.clip();
+      // A tint, not an opaque overwrite: a full-alpha palette.ground fill
+      // here was erasing the real terrain colors/texture renderTerrainPatch
+      // just painted, replacing the whole town interior with one flat
+      // color -- called out directly as "the abrupt change to city/town,"
+      // and confirmed visually: a stark seam right at the wall between
+      // richly varied countryside outside and a flat tan disc inside, with
+      // no real reference map doing anything like it (a town is built ON
+      // its terrain, not a differently-colored patch cut into it). Partial
+      // alpha keeps the real ground's own color/hachure texture reading
+      // through, softened toward the settlement's ground tone -- a
+      // "cleared, settled" look instead of a hard material swap.
       ctx.fillStyle = palette.ground;
+      ctx.globalAlpha = 0.78;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.globalAlpha = 1;
     }
 
     // River through the settlement: renderTerrainPatch's own river chains
