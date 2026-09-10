@@ -875,8 +875,13 @@ function renderSettlementMap(container, params) {
     ctx.save();
     pathFromBoundary();
     ctx.clip();
+    // The radial term alone produced perfectly concentric rings around
+    // the hub, which reads as machined rather than drawn; the noise term
+    // bends those contours so they wander like real ground does.
+    const groundWarp = makeFbmSampler(hachureRng, 3);
     paintHachureField(ctx, canvas.width, canvas.height, hachureRng, palette.ink,
-      (x, y) => -Math.hypot(x - hubX, y - hubY), null, { spacing: 4, strokeLen: 5 });
+      (x, y) => -Math.hypot(x - hubX, y - hubY) + groundWarp(x / canvas.width * 2.5, y / canvas.height * 2.5) * R * 0.6,
+      null, { spacing: 4, strokeLen: 5 });
     ctx.restore();
 
     // Street network: spokes radiating from the hub (uneven length),
