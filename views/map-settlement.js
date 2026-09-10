@@ -912,10 +912,26 @@ function renderSettlementMap(container, params) {
       const hdx = cell.x - hubX, hdy = cell.y - hubY;
       const distFromHub = Math.hypot(hdx, hdy);
       if (distFromHub < plazaR) return null;
-      if (distToSpokes(cell.x, cell.y) < streetWidth / 2) return null;
-      if (distToRings(cell.x, cell.y) < streetWidth / 2) return null;
-      if (distToBranches(cell.x, cell.y) < streetWidth * 0.35) return null;
-      if (distToLanes(cell.x, cell.y) < streetWidth * 0.22) return null;
+      // These checks test the CELL's own centroid point against the
+      // street network, but what actually has to stay clear of the
+      // street is the drawn BUILDING's edge -- and a building can be up
+      // to R*0.3 across (city tier), 60-150px+, while the old margins
+      // here were a small fixed fraction of streetWidth (as little as
+      // ~6px). A building whose centroid barely cleared that could still
+      // visually bury the street under its own footprint, which is
+      // exactly what was observed: real exported towns showed zero
+      // visible street anywhere, wall-to-wall buildings with no gap.
+      // Scaling the margin by this cell's own size (its buildable
+      // rect's real extent is bounded by its polygon area) fixes that at
+      // the source -- primary streets (spokes/rings) get the full margin
+      // since they must stay clearly open; minor paths (branches/lanes)
+      // get a smaller fraction since alleys are meant to weave more
+      // tightly between buildings.
+      const cellHalfSize = Math.sqrt(cellArea(cell)) * 0.5;
+      if (distToSpokes(cell.x, cell.y) < streetWidth / 2 + cellHalfSize * 0.4) return null;
+      if (distToRings(cell.x, cell.y) < streetWidth / 2 + cellHalfSize * 0.4) return null;
+      if (distToBranches(cell.x, cell.y) < streetWidth * 0.35 + cellHalfSize * 0.25) return null;
+      if (distToLanes(cell.x, cell.y) < streetWidth * 0.22 + cellHalfSize * 0.15) return null;
       // Composes with (doesn't replace) the sea-level rejection above --
       // a building can't sit in the river channel either, when this town
       // has one running through it.
