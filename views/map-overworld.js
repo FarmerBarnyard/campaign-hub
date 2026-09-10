@@ -1445,8 +1445,72 @@ function renderOverworldMap(container) {
     const byScore = settlements.slice().sort((a, b) => b.score - a.score);
     const cityCount = Math.max(1, Math.round(byScore.length * 0.15));
     const townCount = Math.max(0, Math.round(byScore.length * 0.35));
+
+    // Tiers were previously assigned on score rank alone -- the top 15%
+    // of sites became cities regardless of whether the ground could hold
+    // one. That routinely put a city on a narrow headland or spit, and
+    // once the settlement generator started fitting its footprint to the
+    // real shoreline, those sites rendered as a sparse crescent of
+    // buildings jammed against the frame: a correct drawing of an
+    // impossible town. A tier now has to EARN its size -- the site is
+    // checked for how much of that tier's actual footprint is land
+    // before it's allowed to claim it.
+    //
+    // The settlement map shows a window of this map
+    // (SETTLEMENT_ZOOM_FACTOR) painted onto a fixed square canvas, and
+    // that window is not square, so a tier's radius maps to a different
+    // overworld distance horizontally than vertically -- hence the
+    // separate x/y scales and the elliptical sampling below.
+    const owPerSettlementX = (canvas.width / SETTLEMENT_ZOOM_FACTOR) / SETTLEMENT_CANVAS_SIZE;
+    const owPerSettlementY = (canvas.height / SETTLEMENT_ZOOM_FACTOR) / SETTLEMENT_CANVAS_SIZE;
+    function landFractionFor(s, tier) {
+      const radius = SETTLEMENT_TIER_CONFIG[tier].radius;
+      const rx = radius * owPerSettlementX, ry = radius * owPerSettlementY;
+      const steps = 9;
+      let land = 0, total = 0;
+      for (let iy = -steps; iy <= steps; iy++) {
+        for (let ix = -steps; ix <= steps; ix++) {
+          const fx = ix / steps, fy = iy / steps;
+          if (fx * fx + fy * fy > 1) continue;
+          total++;
+          const px = s.x + fx * rx, py = s.y + fy * ry;
+          // Off-canvas counts as not-land: a site hard against the map
+          // edge has no room for a full footprint either.
+          if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) continue;
+          const gx = Math.min(cols - 1, Math.max(0, Math.floor(px / cellW)));
+          const gy = Math.min(rows - 1, Math.max(0, Math.floor(py / cellH)));
+          if (heights[gy * cols + gx] >= seaLevel + 0.02) land++;
+        }
+      }
+      return total ? land / total : 0;
+    }
+
+    // Filled highest tier first, each slot going to the best-scoring site
+    // that can actually hold it -- so a city lands on a site with room
+    // for a city rather than simply on the top-scoring site. If no site
+    // qualifies, the map genuinely has no city, which is the honest
+    // result for a chain of small islands.
+    const tierOf = new Array(byScore.length).fill(null);
+    function fillTier(tier, slots, minLandFraction) {
+      let filled = 0;
+      for (let i = 0; i < byScore.length && filled < slots; i++) {
+        if (tierOf[i]) continue;
+        if (landFractionFor(byScore[i], tier) < minLandFraction) continue;
+        tierOf[i] = tier;
+        filled++;
+      }
+    }
+    // Thresholds measured, not guessed: sampling land fractions across
+    // several real seeds put the headland site that prompted this fix at
+    // 0.39 of a city footprint, a healthy inland-ish city site at 0.77,
+    // and solid town sites in the 0.6-0.9 band. A small island chain
+    // legitimately ends up with no city under these numbers, which is
+    // the honest answer for that geography rather than a bug.
+    fillTier('city', cityCount, 0.70);
+    fillTier('town', townCount, 0.55);
+
     byScore.forEach((s, i) => {
-      s.tier = i < cityCount ? 'city' : i < cityCount + townCount ? 'town' : 'village';
+      s.tier = tierOf[i] || 'village';
       s.name = generateSettlementName(nameRng, s.tier, regionCategory[regionOf[s.index]]);
     });
 

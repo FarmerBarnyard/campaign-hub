@@ -45,6 +45,13 @@ function deriveSettlementSeed(overworldSeed, idx) {
 // overworld map: village = small and sparse with no wall; town = denser
 // with a wall and a couple of gates; city = densest, walled, more gates,
 // and the only tier with its own castle compound.
+// The settlement canvas is square and fixed-size. Named here rather than
+// left as a bare literal in the markup because views/map-overworld.js
+// needs it too, to convert a tier's radius (settlement pixels, below)
+// into real overworld distance when checking whether a candidate site
+// has enough land to hold that tier at all.
+const SETTLEMENT_CANVAS_SIZE = 700;
+
 const SETTLEMENT_TIER_CONFIG = {
   village: { cellCount: 55, radius: 160, spokes: 4, rings: 1, wall: false, gates: 0 },
   town: { cellCount: 120, radius: 200, spokes: 6, rings: 2, wall: true, gates: 2 },
@@ -303,7 +310,7 @@ function renderSettlementMap(container, params) {
         <button id="st-save">Save to campaign</button>
         <p id="st-status" class="status-text"></p>
       </div>
-      <canvas id="st-canvas" width="700" height="700"></canvas>
+      <canvas id="st-canvas" width="${SETTLEMENT_CANVAS_SIZE}" height="${SETTLEMENT_CANVAS_SIZE}"></canvas>
     </div>
     <div class="settlement-poi-panel" id="st-poi"></div>
   `;
