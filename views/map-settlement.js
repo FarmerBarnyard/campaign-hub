@@ -346,10 +346,48 @@ function renderSettlementMap(container, params) {
     const castleRng = mulberry32(seed + 909090);
     const roadRng = mulberry32(seed + 202020);
 
-    const cx = canvas.width / 2, cy = canvas.height / 2;
+    let cx = canvas.width / 2, cy = canvas.height / 2;
     const R = config.radius;
     const streetWidth = Math.max(10, R * 0.045);
     const plazaR = R * 0.08;
+
+    // Re-center on the local land mass before anything else is laid out.
+    // The overworld guarantees a settlement's own cell is land, but says
+    // nothing about the land AROUND it -- a town sited on a headland or
+    // just inside a bay has the canvas center sitting near the shore,
+    // with usable ground only off to one side. Left uncorrected, the
+    // town's circular footprint hangs half over water: before the
+    // shoreline fitting below existed it simply drew over the sea, and
+    // with it, the town collapses to a lopsided crescent pinned to one
+    // edge. Shifting the center toward the centroid of nearby land (only
+    // partway, and clamped) gives the settlement the best-fitting spot on
+    // the ground it actually has. Inland towns have a centroid
+    // essentially at the center already, so they don't move at all.
+    if (sampleGuide) {
+      const probeR = R * 1.2;
+      let sumX = 0, sumY = 0, landSamples = 0;
+      for (let dy = -probeR; dy <= probeR; dy += 8) {
+        for (let dx = -probeR; dx <= probeR; dx += 8) {
+          if (dx * dx + dy * dy > probeR * probeR) continue;
+          const px = cx + dx, py = cy + dy;
+          if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) continue;
+          if (sampleGuide(px / canvas.width, py / canvas.height) < sea + 0.02) continue;
+          sumX += px; sumY += py; landSamples++;
+        }
+      }
+      if (landSamples > 20) {
+        let ox = sumX / landSamples - cx, oy = sumY / landSamples - cy;
+        const shift = Math.hypot(ox, oy), maxShift = R * 0.55;
+        if (shift > maxShift) { ox = (ox / shift) * maxShift; oy = (oy / shift) * maxShift; }
+        // Then clamped to keep the town's full extent on the canvas --
+        // an unclamped shift toward a landmass that runs off one side
+        // walks the settlement straight off the edge with its buildings
+        // cut in half by the frame.
+        const edgePad = R;
+        cx = Math.max(edgePad, Math.min(canvas.width - edgePad, cx + ox));
+        cy = Math.max(edgePad, Math.min(canvas.height - edgePad, cy + oy));
+      }
+    }
 
     // Market hub: offset from the town's own geometric center -- a real
     // medieval town grew from a market street/square near a gate or river
@@ -364,41 +402,60 @@ function renderSettlementMap(container, params) {
     const hubX = cx + Math.cos(hubAngle0) * R * hubOffsetFrac;
     const hubY = cy + Math.sin(hubAngle0) * R * hubOffsetFrac;
 
-    // Coastal shaping: when a real backdrop is available, probe a ring of
-    // points around the town for water so the boundary can recede toward
-    // an actual nearby shore instead of ignoring it entirely -- addresses
-    // "no surrounding context" more literally than just painting terrain
-    // behind an oblivious circle. Smoothstepped around sea level (not a
-    // hard cutoff) so the recession reads as a gradual coastal lean, not a
-    // faceted bite out of the boundary.
-    const coastalProbeCount = 16;
-    let coastalHeights = null;
+    // Shoreline fitting: march outward from the town center along a ring
+    // of rays and record how far the land ACTUALLY extends before it
+    // drops below sea level, then cap the town's radius at that distance
+    // per angle. Replaces a coarse 16-point ring probe that only scaled
+    // the radius by a smoothstepped 0.45-1.0 factor -- that was still an
+    // approximation of the coastline rather than the coastline itself, so
+    // a coastal town's footprint routinely ran well past the real shore
+    // and had to be clipped away, leaving a lopsided half-town. Fitting
+    // the radius to the measured shore distance instead means the
+    // settlement SITS ON the headland/inlet it was placed in, complete,
+    // at whatever size that land actually supports.
+    const SHORE_PROBE_ANGLES = 64;
+    const SHORE_STEP = 4;   // px per march step -- fine enough for a 160-260px radius
+    const SHORE_INSET = 10; // hold the town edge just back from the waterline itself
+    let shoreLimit = null;
     if (sampleGuide) {
-      const probeR = R * 1.15;
-      coastalHeights = new Array(coastalProbeCount);
-      for (let i = 0; i < coastalProbeCount; i++) {
-        const angle = (i / coastalProbeCount) * Math.PI * 2;
-        const px = cx + Math.cos(angle) * probeR, py = cy + Math.sin(angle) * probeR;
-        coastalHeights[i] = sampleGuide(px / canvas.width, py / canvas.height);
+      const maxProbe = R * 1.25;
+      const raw = new Float64Array(SHORE_PROBE_ANGLES);
+      for (let i = 0; i < SHORE_PROBE_ANGLES; i++) {
+        const angle = (i / SHORE_PROBE_ANGLES) * Math.PI * 2;
+        const ca = Math.cos(angle), sa = Math.sin(angle);
+        let d = SHORE_STEP;
+        while (d <= maxProbe) {
+          if (sampleGuide((cx + ca * d) / canvas.width, (cy + sa * d) / canvas.height) < sea + 0.02) break;
+          d += SHORE_STEP;
+        }
+        // Floored so a town sited right at a waterline still gets a real
+        // (if small) footprint rather than collapsing to nothing.
+        raw[i] = Math.max(R * 0.25, d - SHORE_INSET);
+      }
+      // One smoothing pass around the ring, same reasoning as wallRAt's
+      // box-average below: a single narrow inlet shouldn't carve a
+      // one-sample spike out of the boundary.
+      shoreLimit = new Float64Array(SHORE_PROBE_ANGLES);
+      for (let i = 0; i < SHORE_PROBE_ANGLES; i++) {
+        const prev = raw[(i - 1 + SHORE_PROBE_ANGLES) % SHORE_PROBE_ANGLES];
+        const next = raw[(i + 1) % SHORE_PROBE_ANGLES];
+        shoreLimit[i] = (prev + raw[i] * 2 + next) / 4;
       }
     }
-    function coastalMultiplier(theta) {
-      if (!coastalHeights) return 1;
-      const f = (((theta % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * coastalProbeCount;
-      const i0 = Math.floor(f) % coastalProbeCount;
-      const i1 = (i0 + 1) % coastalProbeCount;
+    function shoreLimitAt(theta) {
+      if (!shoreLimit) return Infinity;
+      const f = (((theta % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * SHORE_PROBE_ANGLES;
+      const i0 = Math.floor(f) % SHORE_PROBE_ANGLES;
+      const i1 = (i0 + 1) % SHORE_PROBE_ANGLES;
       const t = f - Math.floor(f);
-      const h = coastalHeights[i0] * (1 - t) + coastalHeights[i1] * t;
-      const lo = sea - 0.05, hi = sea + 0.05;
-      const s = Math.max(0, Math.min(1, (h - lo) / (hi - lo)));
-      // Water side can recede to 45% of the base radius now (was 70%) --
-      // the original 30%-max reduction wasn't enough to keep the whole
-      // town on a genuinely narrow peninsula/spit, which a real seed showed
-      // sitting half over open water. The per-cell land check above is the
-      // real backstop for buildings specifically; this just keeps the
-      // wall/street geometry itself from reaching as far into the water in
-      // the first place.
-      return 0.45 + 0.55 * s;
+      return shoreLimit[i0] * (1 - t) + shoreLimit[i1] * t;
+    }
+    // "How much does the land run out in this direction, relative to the
+    // town's nominal radius" -- 1 means open land all the way out, lower
+    // means the shore cuts in. Used for water-facing POI siting (harbor).
+    function waterFacingScore(theta) {
+      if (!shoreLimit) return 1;
+      return Math.min(1, shoreLimitAt(theta) / R);
     }
 
     // Organic boundary: a wobbled per-angle radius instead of a hard circle.
@@ -411,8 +468,8 @@ function renderSettlementMap(container, params) {
     const wobble = makeRadialWobbleSampler(boundaryRng, 5);
     const WOBBLE_AMP = 0.18;
     function effectiveR(theta) {
-      const base = R * (1 + WOBBLE_AMP * wobble(theta)) * coastalMultiplier(theta);
-      return Math.min(base, canvas.width / 2 * 0.97);
+      const base = R * (1 + WOBBLE_AMP * wobble(theta));
+      return Math.min(base, shoreLimitAt(theta), canvas.width / 2 * 0.97);
     }
     // The wall is drawn as a coarse, faceted polygon (WALL_SEGMENTS below,
     // far fewer than the 128-segment boundary silhouette) specifically so
@@ -639,6 +696,22 @@ function renderSettlementMap(container, params) {
       for (let i = 1; i < townBoundaryLoop.length; i++) ctx.lineTo(townBoundaryLoop[i].x, townBoundaryLoop[i].y);
       ctx.closePath();
     }
+    // Intersects the current clip with the REAL land contour (the same
+    // beachLoops renderTerrainPatch's own isGroundAt tests against), so
+    // the settlement stops exactly where the terrain does. No-op without
+    // a terrain backdrop. `terrainResult` is assigned further down but
+    // every call site runs after that, so the hoisted declaration is safe.
+    function clipToRealLand() {
+      if (!terrainResult || !terrainResult.beachLoops || !terrainResult.beachLoops.length) return;
+      const landPath = new Path2D();
+      for (const loop of terrainResult.beachLoops) {
+        if (!loop.length) continue;
+        landPath.moveTo(loop[0].x, loop[0].y);
+        for (let i = 1; i < loop.length; i++) landPath.lineTo(loop[i].x, loop[i].y);
+        landPath.closePath();
+      }
+      ctx.clip(landPath, 'evenodd');
+    }
 
     // Surrounding terrain: reuses views/map-detail.js's renderTerrainPatch
     // exactly as views/map-landmark.js does, painting real backdrop terrain
@@ -655,6 +728,37 @@ function renderSettlementMap(container, params) {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
+    // The settlement's own ground tone, matched to the biome it actually
+    // sits in rather than one fixed tan for every town everywhere. The
+    // flat palette.ground alone made a forest town and a barrens town
+    // render identical pale discs regardless of the countryside around
+    // them; blending it toward the DOMINANT land biome under this town's
+    // own footprint (the same refBiomeOf grid renderTerrainPatch already
+    // classified) keeps a forest town reading green-ish and a barrens
+    // town dusty, so the interior belongs to its surroundings instead of
+    // being a swatch dropped on top of them. Water cells are excluded
+    // from the vote -- a coastal town is still a LAND settlement, and
+    // letting deepwater win the count would tint the whole town blue.
+    let townGroundTone = palette.ground;
+    if (terrainResult) {
+      const biomeVotes = {};
+      const { cols: tCols, rows: tRows, cellW: tCellW, cellH: tCellH, refBiomeOf } = terrainResult;
+      for (let gy = 0; gy < tRows; gy++) {
+        for (let gx = 0; gx < tCols; gx++) {
+          const px = (gx + 0.5) * tCellW, py = (gy + 0.5) * tCellH;
+          const ddx = px - cx, ddy = py - cy;
+          if (Math.hypot(ddx, ddy) > effectiveR(Math.atan2(ddy, ddx))) continue;
+          const b = refBiomeOf[gy * tCols + gx];
+          if (b === 'deepwater' || b === 'shallowwater') continue;
+          biomeVotes[b] = (biomeVotes[b] || 0) + 1;
+        }
+      }
+      let dominantBiome = null, bestVote = 0;
+      for (const b in biomeVotes) if (biomeVotes[b] > bestVote) { bestVote = biomeVotes[b]; dominantBiome = b; }
+      const biomeColor = dominantBiome && theme.overworld.biomes[dominantBiome];
+      if (biomeColor) townGroundTone = lerpBuildingColor(palette.ground, biomeColor, 0.45);
+    }
+
     // Everything from here through the plaza is clipped to the wobbled
     // boundary when a backdrop was painted -- this is what makes the town
     // read as literally cut into the terrain rather than floating over a
@@ -664,18 +768,29 @@ function renderSettlementMap(container, params) {
     if (sampleGuide) {
       pathFromBoundary();
       ctx.clip();
-      // A tint, not an opaque overwrite: a full-alpha palette.ground fill
-      // here was erasing the real terrain colors/texture renderTerrainPatch
-      // just painted, replacing the whole town interior with one flat
-      // color -- called out directly as "the abrupt change to city/town,"
-      // and confirmed visually: a stark seam right at the wall between
-      // richly varied countryside outside and a flat tan disc inside, with
-      // no real reference map doing anything like it (a town is built ON
-      // its terrain, not a differently-colored patch cut into it). Partial
+      // ...and clipped to the REAL coastline as well, not just to the
+      // town's own wobbled circle. effectiveR's shoreline fitting already
+      // pulls that circle in to the measured land extent, but it's a
+      // 64-ray radial probe, so fine coastline detail between rays can
+      // still poke through. Intersecting the clip with renderTerrainPatch's
+      // own land contour (the same beachLoops its isGroundAt uses) makes
+      // the settlement's footprint end exactly where the terrain does.
+      // Every later pass in this save/restore block -- river, hachure,
+      // streets, buildings -- inherits this clip, so none of them can
+      // land on water either.
+      clipToRealLand();
+      // A tint, not an opaque overwrite: a full-alpha fill here was
+      // erasing the real terrain colors/texture renderTerrainPatch just
+      // painted, replacing the whole town interior with one flat color --
+      // called out directly as "the abrupt change to city/town," and
+      // confirmed visually: a stark seam right at the wall between richly
+      // varied countryside outside and a flat tan disc inside, with no
+      // real reference map doing anything like it (a town is built ON its
+      // terrain, not a differently-colored patch cut into it). Partial
       // alpha keeps the real ground's own color/hachure texture reading
-      // through, softened toward the settlement's ground tone -- a
+      // through, softened toward the biome-matched tone above -- a
       // "cleared, settled" look instead of a hard material swap.
-      ctx.fillStyle = palette.ground;
+      ctx.fillStyle = townGroundTone;
       ctx.globalAlpha = 0.78;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.globalAlpha = 1;
@@ -977,8 +1092,8 @@ function renderSettlementMap(container, params) {
       }
       if (candidates.length === 0) continue;
       let pool = candidates;
-      if (poiType.coastalOnly && coastalHeights) {
-        const waterFacing = candidates.filter((c) => coastalMultiplier(c.angleFromCenter) < 0.9);
+      if (poiType.coastalOnly && shoreLimit) {
+        const waterFacing = candidates.filter((c) => waterFacingScore(c.angleFromCenter) < 0.9);
         if (waterFacing.length) pool = waterFacing;
       }
       const cells = pool.map((c) => c.cell);
@@ -1191,6 +1306,12 @@ function renderSettlementMap(container, params) {
 
     ctx.restore(); // undo the terrain clip (no-op if none was applied)
 
+    // The wall/boundary edge gets the same real-land clip the interior
+    // above does -- otherwise the town's ground now correctly stops at
+    // the shore while its wall carries on out across open water, which
+    // reads worse than the original problem did.
+    ctx.save();
+    clipToRealLand();
     if (config.wall) {
       const gateHalfWidth = 0.1;
       function nearGate(angle) {
@@ -1264,6 +1385,7 @@ function renderSettlementMap(container, params) {
       ctx.lineWidth = 1.5;
       ctx.stroke();
     }
+    ctx.restore(); // undo the wall's own real-land clip
 
     // Fine parchment-grain texture over the whole finished composition --
     // same helper/convention every other generator here uses (reuses this
