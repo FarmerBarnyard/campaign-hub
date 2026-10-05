@@ -426,6 +426,8 @@ function renderSettlementMap(container, params) {
     <div class="map-layout">
       <div class="map-controls">
         <label>Theme <select id="st-theme"></select></label>
+        <label><input type="checkbox" id="st-server"> Render on server (rules-checked, cached)</label>
+        <p id="st-server-status" class="status-text"></p>
         <p class="status-text">Derived from overworld seed ${overworldSeed}, settlement #${idx + 1} -- this layout is fixed to that settlement and can't be reseeded independently.</p>
         <hr>
         <button id="st-export">Export PNG</button>
@@ -2064,9 +2066,98 @@ function renderSettlementMap(container, params) {
     progress.done();
   }
 
+  // ---- server rendering ---------------------------------------------------
+  // Optional path: the Worker -> mapgen service draws the same map and
+  // checks it against RULES.md, re-rolling a layout that breaks a hard rule
+  // (the browser path can't). Everything below runs only from event
+  // handlers -- the mapgen service itself executes this view's render path
+  // headlessly, where Api/ServerMap don't exist.
+  let serverResult = null;     // the Worker's last response, while server mode is on
+  let serverRequestId = 0;     // discards a slow response that a newer request has overtaken
+
+  // The same params the browser path parsed above, in the shape the Worker
+  // validates. `guide` is the terrain height grid the overworld threads
+  // through; without it the server would draw flat ground and no longer
+  // match this page.
+  function serverParams() {
+    const out = { seed: overworldSeed, idx, name, tier: tierKey, x: clickX, y: clickY, coastal: params.get('coastal') || '0' };
+    for (const key of ['h', 'm', 'sea', 'guide', 'gw', 'gh', 'zoom']) {
+      const v = params.get(key);
+      if (v !== null && v !== '') out[key] = v;
+    }
+    return out;
+  }
+
+  async function renderOnServer() {
+    const statusEl = container.querySelector('#st-server-status');
+    const myRequest = ++serverRequestId;
+    const progress = showGenerationProgress(canvas, 'Rendering on server…');
+    statusEl.textContent = '';
+    try {
+      const res = await ServerMap.render({
+        type: 'settlement', params: serverParams(), scale: 2,
+        theme: container.querySelector('#st-theme').value,
+      });
+      const img = await ServerMap.loadImage(res.displayUrl);
+      if (myRequest !== serverRequestId) return;   // superseded, or the box was unticked
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      serverResult = res;
+
+      const poiEl = container.querySelector('#st-poi');
+      const labels = ServerMap.poiLabels(res.meta.meta);
+      poiEl.textContent = '';
+      if (labels.length) {
+        const h = document.createElement('h3');
+        h.textContent = 'Notable locations';
+        poiEl.appendChild(h);
+        for (const label of labels) {
+          const p = document.createElement('p');
+          p.textContent = label;
+          poiEl.appendChild(p);
+        }
+      }
+      const flaws = res.meta.violations || [];
+      statusEl.textContent = (res.cached ? 'Loaded from cache.' : 'Rendered on server.') +
+        (flaws.length ? ` Served with ${flaws.length} rule violation(s): ${flaws.map((f) => f.id).join(', ')}.` : ' Passed all rules.');
+    } catch (e) {
+      if (myRequest !== serverRequestId) return;
+      // Fall back to the browser render rather than leaving a blank canvas.
+      container.querySelector('#st-server').checked = false;
+      serverResult = null;
+      statusEl.textContent = ServerMap.describeError(e);
+      await generate();
+      return;
+    } finally {
+      progress.done();
+    }
+  }
+
+  container.querySelector('#st-server').addEventListener('change', (ev) => {
+    if (ev.target.checked) {
+      renderOnServer();
+    } else {
+      serverRequestId++;
+      serverResult = null;
+      container.querySelector('#st-server-status').textContent = '';
+      generate();
+    }
+  });
+
   generate();
-  container.querySelector('#st-theme').addEventListener('change', generate);
+  container.querySelector('#st-theme').addEventListener('change', () => {
+    if (serverResult) renderOnServer();
+    else generate();
+  });
   wireMapExportSave(container, canvas, 'st', async (offCtx) => {
+    // Server mode: export the Worker's stored 2x master instead of redrawing.
+    // offCtx is already scaled for the export, so drawing at the canvas's
+    // logical size lands on the master's full resolution.
+    if (serverResult) {
+      const master = await ServerMap.loadImage(serverResult.masterUrl);
+      offCtx.drawImage(master, 0, 0, canvas.width, canvas.height);
+      return;
+    }
     const prevCtx = ctx;
     ctx = offCtx;
     await generate();

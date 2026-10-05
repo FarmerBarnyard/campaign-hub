@@ -32,6 +32,11 @@ const TYPES = new Set(['settlement', 'dungeon', 'detail', 'landmark', 'overworld
 // dropped rather than trusted.
 const ALLOWED_PARAMS = new Set([
   'seed', 'idx', 'name', 'tier', 'x', 'y', 'kind', 'biome', 'theme', 'variant',
+  // Terrain backdrop an overworld click threads through (views/map-overworld.js
+  // buildGuideParams): a base64 height grid plus its dimensions. Without these
+  // a server render silently falls back to flat ground and no longer matches
+  // what the browser draws for the same settlement.
+  'h', 'm', 'sea', 'coastal', 'guide', 'gw', 'gh', 'zoom',
   // Overworld generation controls (see makeOverworldStubs in render.js) --
   // the only way to drive that generator headlessly, since it reads these
   // straight off browser form controls with no params argument of its own.
@@ -39,7 +44,8 @@ const ALLOWED_PARAMS = new Set([
   'wildzones', 'legend', 'settle', 'tileCols', 'tileRows',
 ]);
 
-const MAX_BODY_BYTES = 16 * 1024;   // a params object, nothing more
+const MAX_BODY_BYTES = 16 * 1024;   // a params object (guide grid included), nothing more
+const MAX_GUIDE_CHARS = 4400;       // 64x48 height grid = 3072 bytes = 4096 base64 chars, with headroom
 const MAX_SCALE = 4;
 const MAX_CONCURRENT = 2;           // canvas renders are CPU-bound; keep headroom on the VM
 const MAX_QUEUED = 16;
@@ -129,6 +135,14 @@ async function handleRender(body) {
   for (const [k, v] of Object.entries(body.params || {})) {
     if (!ALLOWED_PARAMS.has(k)) continue;
     if (v === null || v === undefined) continue;
+    if (k === 'guide') {
+      // Rejected, never truncated: a clipped grid would decode to a
+      // different (wrong) backdrop rather than failing visibly.
+      const g = String(v);
+      if (g.length > MAX_GUIDE_CHARS || !/^[A-Za-z0-9+/]*={0,2}$/.test(g)) throw badRequest('invalid guide');
+      params[k] = g;
+      continue;
+    }
     params[k] = String(v).slice(0, 200);
   }
   // A caller must not be able to pin the retry variant: it exists so the
