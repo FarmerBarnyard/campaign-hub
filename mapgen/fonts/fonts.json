@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Maps each bundled font file to the CSS family names the generators ask for.",
+    "The generators request 'Georgia, \"Palatino Linotype\", \"Book Antiqua\", serif'",
+    "and 'sans-serif' -- none of which exist on Linux. Without these aliases every",
+    "label silently falls back to whatever the container happens to have, which",
+    "changes measureText and therefore every label position and halo box. That is a",
+    "silent, invisible drift of exactly the kind this whole rules exercise exists to",
+    "stop, so a missing family is a hard error rather than a fallback.",
+    "",
+    "P052 is URW's Palatino clone -- the second entry in the generators' own stack,",
+    "so using it as the serif is a faithful reading of the intended look rather than",
+    "a substitution. It ships in Debian (fonts-urw-base35), which keeps the image",
+    "build reproducible and offline instead of pulling a font off the internet.",
+    "DejaVu Sans (fonts-dejavu-core) covers the sans-serif labels.",
+    "",
+    "Once the browser stops rendering maps these files ARE the typography -- there",
+    "is no client-side font to disagree with, which removes the drift permanently."
+  ],
+  "aliases": {
+    "P052-Roman.otf": ["Georgia", "Palatino Linotype", "Book Antiqua", "serif"],
+    "P052-Bold.otf": ["Georgia", "Palatino Linotype", "Book Antiqua", "serif"],
+    "P052-Italic.otf": ["Georgia", "Palatino Linotype", "Book Antiqua", "serif"],
+    "DejaVuSans.ttf": ["sans-serif", "Helvetica", "Arial"],
+    "DejaVuSans-Bold.ttf": ["sans-serif", "Helvetica", "Arial"]
+  },
+  "required": ["Georgia", "Palatino Linotype", "Book Antiqua", "serif", "sans-serif"]
+}

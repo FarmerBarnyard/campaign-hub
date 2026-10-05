@@ -1,0 +1,20 @@
+{
+  "name": "campaign-hub-mapgen",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless map renderer for Campaign Hub. Runs the SAME generator source the browser uses (../lib, ../core) against a native canvas, validates every render against RULES.md, and serves PNG + metadata.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "spike": "node src/spike.js",
+    "audit": "node src/audit.js",
+    "design-review": "node src/design-review.js"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.60"
+  },
+  "devDependencies": {
+    "//": "The design agent is a batch review tool, not part of serving a map -- it stays out of the runtime image so the render path carries no API client and no key.",
+    "@anthropic-ai/sdk": "^0.71.0"
+  }
+}

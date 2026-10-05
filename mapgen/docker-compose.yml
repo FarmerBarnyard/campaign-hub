@@ -1,0 +1,44 @@
+services:
+  mapgen:
+    build:
+      # The repo root, because the image needs lib/ and views/ alongside
+      # mapgen/ -- the service runs the same generator source the browser
+      # does rather than a server-side copy that could drift from it.
+      context: ..
+      dockerfile: mapgen/Dockerfile
+    image: campaign-hub-mapgen:latest
+    container_name: mapgen
+    restart: unless-stopped
+
+    # Loopback only. The Cloudflare tunnel runs on this host and reaches the
+    # service over localhost, so nothing else needs to. Dropping the
+    # "127.0.0.1:" prefix would publish the renderer to the VM's LAN.
+    ports:
+      - "127.0.0.1:8791:8791"
+
+    environment:
+      MAPGEN_PORT: "8791"
+
+    # Renders are pure functions of their params and cached upstream in R2,
+    # so the container holds nothing worth persisting and can be replaced
+    # freely -- hence no volumes and a read-only root.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # A canvas render is CPU- and memory-hungry, and this VM also runs
+    # Authentik, Ollama and the rest. The cap keeps a runaway print-scale
+    # render from starving them.
+    mem_limit: 3g
+    cpus: 4.0
+
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:8791/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      start_period: 20s
+      interval: 30s
+      timeout: 5s
+      retries: 3
