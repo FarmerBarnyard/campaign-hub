@@ -13,8 +13,8 @@
   "dependencies": {
     "@napi-rs/canvas": "^0.1.60"
   },
+  "//": "devDependencies: the design agent is a batch review tool, not part of serving a map -- it stays out of the runtime image so the render path carries no API client and no key.",
   "devDependencies": {
-    "//": "The design agent is a batch review tool, not part of serving a map -- it stays out of the runtime image so the render path carries no API client and no key.",
     "@anthropic-ai/sdk": "^0.71.0"
   }
 }

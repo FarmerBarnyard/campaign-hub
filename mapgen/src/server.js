@@ -50,6 +50,10 @@ const MAX_RULE_RETRIES = 3;
 let active = 0;
 const queue = [];
 const inFlight = new Map();         // key -> promise, so duplicate requests share one render
+const recentRenders = new Map();          // key -> { value, expires }: recent renders, so the Worker's per-part requests share one
+const RESULT_TTL_MS = 120 * 1000;
+const RESULT_CACHE_MAX = 3;         // a scale-4 canvas is tens of MB of pixels; keep very few
+const PNG_PARTS = new Set(['display', 'master', 'meta']);
 
 function runQueued(fn) {
   return new Promise((resolve, reject) => {
@@ -135,39 +139,89 @@ async function handleRender(body) {
   const wantMaster = body.parts ? body.parts.includes('master') : true;
   const wantDisplay = body.parts ? body.parts.includes('display') : true;
 
-  const key = JSON.stringify([GENERATOR_VERSION, type, scale, theme, params, wantMaster, wantDisplay]);
+  // Binary mode: the Worker asks for one part at a time and streams the PNG
+  // straight into R2 -- a base64-in-JSON master at scale 4 would be larger
+  // than a Worker should hold. Rendering is the expensive step, so all three
+  // parts of one (type, params, scale, theme) share a single render through
+  // the short-lived result cache below.
+  const format = body.format === 'png' ? 'png' : 'json';
+  const part = format === 'png' ? String(body.part || 'display') : null;
+  if (part && !PNG_PARTS.has(part)) throw badRequest('unknown part');
+
+  const renderKey = JSON.stringify([GENERATOR_VERSION, type, scale, theme, params]);
+  const rendered = await renderShared(renderKey, { type, params, scale, theme });
+
+  if (format === 'png') {
+    if (part === 'meta') return { kind: 'json', payload: summary(rendered, type) };
+    const buf = part === 'master' ? rendered.masterPng() : rendered.displayPng();
+    return { kind: 'png', buf, summary: summary(rendered, type) };
+  }
+
+  const payload = summary(rendered, type);
+  if (wantMaster) {
+    payload.master = { width: rendered.canvas.width, height: rendered.canvas.height, png: rendered.masterPng().toString('base64') };
+  }
+  if (wantDisplay) {
+    const d = rendered.displayCanvas();
+    payload.display = { width: d.width, height: d.height, png: rendered.displayPng().toString('base64') };
+  }
+  return { kind: 'json', payload };
+}
+
+function summary(r, type) {
+  return {
+    ok: true,
+    generatorVersion: GENERATOR_VERSION,
+    type,
+    variant: r.variant,
+    meta: r.meta,
+    width: r.width,
+    height: r.height,
+    elapsedMs: r.elapsedMs,
+    rules: r.rules,
+    violations: r.violations,
+  };
+}
+
+// Renders once and keeps the result for RESULT_TTL_MS so the Worker's
+// follow-up part requests (display, then master, then meta) don't each pay
+// for a fresh render. Duplicate concurrent requests share the in-flight
+// promise; only the newest RESULT_CACHE_MAX results are retained, and PNG
+// encoding is lazy so a request for one part never encodes the other.
+async function renderShared(key, { type, params, scale, theme }) {
+  const hit = recentRenders.get(key);
+  if (hit && hit.expires > Date.now()) return hit.value;
   if (inFlight.has(key)) return inFlight.get(key);
 
   const work = runQueued(async () => {
     const started = Date.now();
-    const { rendered, results, hardFailures, variant } = await renderValidated({ type, params, scale, theme });
-
-    const payload = {
-      ok: true,
-      generatorVersion: GENERATOR_VERSION,
-      type,
-      variant,
+    const { rendered, results: ruleResults, hardFailures, variant } = await renderValidated({ type, params, scale, theme });
+    const memo = {};
+    const value = {
+      canvas: rendered.canvas,
       meta: rendered.meta,
       width: rendered.width,
       height: rendered.height,
+      variant,
       elapsedMs: Date.now() - started,
-      rules: results.map((r) => ({ id: r.id, severity: r.severity, pass: r.pass, detail: r.detail })),
+      rules: ruleResults.map((r) => ({ id: r.id, severity: r.severity, pass: r.pass, detail: r.detail })),
       violations: hardFailures.map((f) => ({ id: f.id, detail: f.detail })),
+      displayCanvas() {
+        if (!memo.display) memo.display = scale === 1 ? rendered.canvas : downscale(rendered.canvas, rendered.width, rendered.height);
+        return memo.display;
+      },
+      displayPng() {
+        if (!memo.displayPng) memo.displayPng = this.displayCanvas().toBuffer('image/png');
+        return memo.displayPng;
+      },
+      masterPng() {
+        if (!memo.masterPng) memo.masterPng = rendered.canvas.toBuffer('image/png');
+        return memo.masterPng;
+      },
     };
-    if (wantMaster) {
-      payload.master = {
-        width: rendered.canvas.width, height: rendered.canvas.height,
-        png: rendered.canvas.toBuffer('image/png').toString('base64'),
-      };
-    }
-    if (wantDisplay) {
-      const display = scale === 1 ? rendered.canvas : downscale(rendered.canvas, rendered.width, rendered.height);
-      payload.display = {
-        width: display.width, height: display.height,
-        png: display.toBuffer('image/png').toString('base64'),
-      };
-    }
-    return payload;
+    recentRenders.set(key, { value, expires: Date.now() + RESULT_TTL_MS });
+    while (recentRenders.size > RESULT_CACHE_MAX) recentRenders.delete(recentRenders.keys().next().value);
+    return value;
   }).finally(() => inFlight.delete(key));
 
   inFlight.set(key, work);
@@ -203,6 +257,22 @@ function readBody(req) {
   });
 }
 
+function sendPng(res, buf, sum) {
+  // Small summary in a header so the Worker can record variant/violations
+  // without a second round trip; the full rule list comes from part=meta.
+  const compact = Buffer.from(JSON.stringify({
+    generatorVersion: sum.generatorVersion, variant: sum.variant,
+    width: sum.width, height: sum.height, violations: sum.violations.map((v) => v.id),
+  })).toString('base64');
+  res.writeHead(200, {
+    'Content-Type': 'image/png',
+    'Content-Length': buf.length,
+    'X-Content-Type-Options': 'nosniff',
+    'X-Mapgen-Summary': compact,
+  });
+  res.end(buf);
+}
+
 function send(res, status, obj) {
   const buf = Buffer.from(JSON.stringify(obj));
   res.writeHead(status, {
@@ -222,7 +292,9 @@ const server = http.createServer(async (req, res) => {
   }
   try {
     const body = await readBody(req);
-    send(res, 200, await handleRender(body));
+    const out = await handleRender(body);
+    if (out.kind === 'png') sendPng(res, out.buf, out.summary);
+    else send(res, 200, out.payload);
   } catch (err) {
     // Error codes, never err.message: this response crosses the tunnel to the
     // Worker and on to a browser, and generator internals are not the
