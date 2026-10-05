@@ -315,7 +315,15 @@ function renderTerrainPatch(ctx, canvas, opts) {
     let m = moistureSample(cell.x / canvas.width, cell.y / canvas.height) * 0.6 + targetAvgMoisture * 0.4;
     m = Math.min(1, m + nearRiver[i] * 0.3);
     mOf[i] = m;
-    refBiomeOf[i] = biomeAt(heights[i], m, sea, 0, 0);
+    // biomeAt's third argument is temperature (0 coldest .. 1 hottest); this
+    // smaller local generator has no temperature field of its own (that
+    // lives in the overworld's buildWorld only), so it passes the neutral
+    // mid-value, which keeps this view's results exactly where they always
+    // were: the temperate band (plains/forest/barrens/steppe), plus swamp,
+    // which is temperature-independent. It simply never rolls the newer
+    // climate biomes (tundra/taiga/desert/savanna/jungle) -- consistent
+    // with this view never having had a climate axis before.
+    refBiomeOf[i] = biomeAt(heights[i], m, 0.5, sea, 0, 0);
   });
 
   // Wild-zone overlay setup, mirroring the overworld's own buildWorld
@@ -405,7 +413,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
       const b = biomeAtPoint(px, py);
       if (b === 'hills' || b === 'mountains' || b === 'forest') continue;
       if (b !== 'deepwater' && b !== 'shallowwater' && !isGroundAt(px, py)) continue;
-      paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes.forest);
+      paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes);
     }
   }
 
@@ -435,7 +443,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
       if (b === 'hills' || b === 'mountains') {
         paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, b === 'mountains');
       } else if (b === 'forest') {
-        paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes.forest);
+        paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes);
       }
     }
   }
