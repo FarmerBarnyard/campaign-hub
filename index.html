@@ -12,23 +12,26 @@
      scheme needs to be in img-src here. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.barnyard.site; style-src 'self'; script-src 'self'; img-src 'self' https://api.barnyard.site; base-uri 'self'; form-action 'none';">
 <title>Campaign Hub</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="shell.css?v=50">
+<link rel="stylesheet" href="styles.css?v=50">
+<script src="themes.js?v=50"></script>
 </head>
-<body>
+<body data-shell="campaign">
 
-<header class="app-header">
-  <div class="app-header-main">
-    <p class="wordmark">Campaign Hub</p>
-    <nav class="app-nav">
+<main id="page" class="content">
+  <div class="page-head">
+    <div>
+      <h1>Campaign hub</h1>
+      <p>Build campaigns, write notes and generate maps for your tabletop games.</p>
+    </div>
+    <nav class="app-nav" aria-label="Campaign sections">
       <a href="#/" class="nav-link">Library</a>
       <a href="#/map/dungeon" class="nav-link">Dungeon map</a>
       <a href="#/map/overworld" class="nav-link">Overworld map</a>
     </nav>
   </div>
-  <div class="auth-status" id="auth-status"></div>
-</header>
-
-<main id="app"></main>
+  <div id="app"></div>
+</main>
 
 <!-- Cache-busting: every script tag shares one `v` query param, bumped
      together on any deploy that touches JS. Without this, a returning
@@ -45,42 +48,43 @@
      refetched together the next time a visitor's browser fetches this
      (also-cached, but shorter-lived in practice since it's the page itself)
      index.html, so they can never end up with a same-deploy mismatch again. -->
-<script src="auth-gate.js?v=49"></script>
-<script src="lib/api.js?v=49"></script>
-<script src="lib/server-map.js?v=49"></script>
-<script src="lib/wikilink.js?v=49"></script>
-<script src="lib/render-trace.js?v=49"></script>
-<script src="lib/noise.js?v=49"></script>
-<script src="lib/voronoi-mesh.js?v=49"></script>
-<script src="lib/terrain-grid.js?v=49"></script>
-<script src="lib/watercolor-wash.js?v=49"></script>
-<script src="lib/hydrology.js?v=49"></script>
-<script src="lib/pictorial-buildings.js?v=49"></script>
-<script src="lib/organic-roads.js?v=49"></script>
-<script src="lib/tree-clusters.js?v=49"></script>
-<script src="lib/hachure-terrain.js?v=49"></script>
-<script src="lib/map-labels.js?v=49"></script>
-<script src="lib/keyed-legend.js?v=49"></script>
-<script src="lib/generation-progress.js?v=49"></script>
-<script src="lib/map-themes.js?v=49"></script>
-<script src="lib/settlement-names.js?v=49"></script>
-<script src="lib/map-biome-zones.js?v=49"></script>
-<script src="lib/campaign-themes.js?v=49"></script>
-<script src="lib/zip-writer.js?v=49"></script>
-<script src="lib/room-shapes.js?v=49"></script>
-<script src="lib/landmark-sites.js?v=49"></script>
-<script src="lib/landmark-lore.js?v=49"></script>
-<script src="lib/dungeon-lore.js?v=49"></script>
-<script src="lib/dungeon-props.js?v=49"></script>
-<script src="lib/settlement-poi.js?v=49"></script>
-<script src="views/library.js?v=49"></script>
-<script src="views/campaign.js?v=49"></script>
-<script src="views/new-note.js?v=49"></script>
-<script src="views/map-dungeon.js?v=49"></script>
-<script src="views/map-overworld.js?v=49"></script>
-<script src="views/map-settlement.js?v=49"></script>
-<script src="views/map-detail.js?v=49"></script>
-<script src="views/map-landmark.js?v=49"></script>
-<script src="app.js?v=49"></script>
+<script src="shell.js?v=50"></script>
+<script src="auth-gate.js?v=50"></script>
+<script src="lib/api.js?v=50"></script>
+<script src="lib/server-map.js?v=50"></script>
+<script src="lib/wikilink.js?v=50"></script>
+<script src="lib/render-trace.js?v=50"></script>
+<script src="lib/noise.js?v=50"></script>
+<script src="lib/voronoi-mesh.js?v=50"></script>
+<script src="lib/terrain-grid.js?v=50"></script>
+<script src="lib/watercolor-wash.js?v=50"></script>
+<script src="lib/hydrology.js?v=50"></script>
+<script src="lib/pictorial-buildings.js?v=50"></script>
+<script src="lib/organic-roads.js?v=50"></script>
+<script src="lib/tree-clusters.js?v=50"></script>
+<script src="lib/hachure-terrain.js?v=50"></script>
+<script src="lib/map-labels.js?v=50"></script>
+<script src="lib/keyed-legend.js?v=50"></script>
+<script src="lib/generation-progress.js?v=50"></script>
+<script src="lib/map-themes.js?v=50"></script>
+<script src="lib/settlement-names.js?v=50"></script>
+<script src="lib/map-biome-zones.js?v=50"></script>
+<script src="lib/campaign-themes.js?v=50"></script>
+<script src="lib/zip-writer.js?v=50"></script>
+<script src="lib/room-shapes.js?v=50"></script>
+<script src="lib/landmark-sites.js?v=50"></script>
+<script src="lib/landmark-lore.js?v=50"></script>
+<script src="lib/dungeon-lore.js?v=50"></script>
+<script src="lib/dungeon-props.js?v=50"></script>
+<script src="lib/settlement-poi.js?v=50"></script>
+<script src="views/library.js?v=50"></script>
+<script src="views/campaign.js?v=50"></script>
+<script src="views/new-note.js?v=50"></script>
+<script src="views/map-dungeon.js?v=50"></script>
+<script src="views/map-overworld.js?v=50"></script>
+<script src="views/map-settlement.js?v=50"></script>
+<script src="views/map-detail.js?v=50"></script>
+<script src="views/map-landmark.js?v=50"></script>
+<script src="app.js?v=50"></script>
 </body>
 </html>

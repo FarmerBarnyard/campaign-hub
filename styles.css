@@ -1,238 +1,135 @@
-:root {
-  --bg: #14120f;
-  --surface: #1e1b17;
-  --surface-2: #2a251f;
-  --border: #3a332a;
-  --text: #e8e0d0;
-  --text-dim: #a89a82;
-  --accent: #c0863f;
-  --accent-bright: #e0a860;
-  --danger: #c0392b;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --mono: ui-monospace, "SF Mono", Consolas, monospace;
-}
+/* Campaign Hub: this app's own layout and the class names its views use.
+   Colours, type, the sidebar, the top bar and the Settings panel come from
+   shell.css and themes.js (hand-copied from barnyard-hub, so every
+   barnyard.site page shares one look and one theme choice). The CSP allows
+   only 'self': no inline styles here, no remote resources. */
 
-* { box-sizing: border-box; }
+.content { max-width: 1320px; }
 
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--sans);
-  margin: 0;
-  padding: 0 20px 60px;
-}
+/* Reading views stay at a comfortable width; map generators get the room. */
+#app { max-width: 900px; }
+.content:has(.map-layout) #app { max-width: none; }
 
-a { color: var(--accent-bright); }
+.app-nav { display: inline-flex; padding: 3px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); }
+.nav-link { display: inline-flex; align-items: center; height: 30px; padding: 0 14px; border-radius: 7px; color: var(--fg-dim); text-decoration: none; font-size: 14px; font-weight: 500; }
+.nav-link:hover { color: var(--fg-strong); }
+.nav-link[aria-current="page"] { background: var(--panel); color: var(--fg-strong); box-shadow: 0 0 0 1px var(--line); }
 
-.app-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 16px;
-  padding: 20px 0;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 24px;
-}
+#app h2 { font: 600 20px/1.3 var(--font-display); letter-spacing: -.01em; color: var(--fg-strong); margin: 0 0 16px; }
+#app h3 { font: 600 16px var(--font-display); color: var(--fg-strong); }
 
-.app-header-main { display: flex; align-items: baseline; gap: 24px; }
-
-.wordmark {
-  font-size: 1.3rem;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  margin: 0;
-}
-
-.app-nav { display: flex; gap: 16px; }
-.nav-link { color: var(--text-dim); text-decoration: none; font-size: 0.9rem; }
-.nav-link:hover { color: var(--accent-bright); }
-
-/* Login status, top-right of the header -- see auth-gate.js. Same treatment
-   as barnyard-hub/study-hub's own .auth-status (hand-copied file, kept
-   visually consistent by hand, translated to this repo's warm/accent
-   palette instead of theirs). */
-.auth-status { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; white-space: nowrap; }
-.auth-status-label { color: var(--text-dim); }
-.auth-login-link { color: var(--accent-bright); font-weight: 700; }
-.auth-logout-btn { font-size: 0.78rem; padding: 3px 8px; }
-.auth-logout-btn:hover { border-color: var(--accent); }
-
-main { max-width: 900px; margin: 0 auto; }
-
-/* Map generator pages need more horizontal room than the 900px reading
-   width above -- .map-controls (220px) + gap (20px) + the canvas's own
-   intrinsic width (900px dungeon / 800px overworld) don't fit inside 900px,
-   so the canvas was wrapping onto its own row below a tall controls column
-   and sitting below the fold on a normal-height viewport (2026-09-03 fix --
-   confirmed live: both generators always rendered correctly, this was a
-   pure layout/visibility bug, not a rendering bug). */
-main:has(.map-layout) { max-width: 1200px; }
-
-h2 { font-size: 1.4rem; margin-bottom: 16px; }
-
-.empty-note, .error { color: var(--text-dim); }
-.error { color: var(--danger); }
+.empty-note, .error { color: var(--fg-dim); }
+.error { color: var(--alert); }
 
 .inline-form { display: flex; gap: 8px; margin-top: 20px; }
 .inline-form input { flex: 1; }
 
-input, textarea, select, button {
-  font-family: var(--sans);
-  font-size: 0.9rem;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 4px;
-  padding: 7px 10px;
+/* Controls: secondary by default, the main action of a form or a generator in the accent. */
+#app input, #app textarea, #app select, #app button {
+  font: inherit; font-size: 14px; color: var(--fg-strong);
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; min-height: 36px;
 }
+#app textarea { width: 100%; resize: vertical; font-family: var(--font-mono); font-size: 13px; line-height: 1.5; }
+#app button { cursor: pointer; background: var(--panel); font-weight: 500; }
+#app button:hover:not(:disabled) { background: var(--panel-2); }
+#app button:disabled { opacity: .5; cursor: not-allowed; }
+#app button[type="submit"], #app #nn-generate, #app button[id$="-regen"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+#app button[type="submit"]:hover:not(:disabled), #app #nn-generate:hover:not(:disabled), #app button[id$="-regen"]:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
 
-textarea { width: 100%; resize: vertical; font-family: var(--mono); }
-
-button {
-  cursor: pointer;
-  background: var(--accent);
-  color: #1a1408;
-  font-weight: 700;
-  border: none;
-}
-button:hover { background: var(--accent-bright); }
-
-.campaign-list { list-style: none; padding: 0; }
-.campaign-list li {
-  display: flex;
-  justify-content: space-between;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border);
-}
-.campaign-meta { color: var(--text-dim); font-size: 0.85rem; }
+/* Library: one list, one row per campaign. */
+.campaign-list { list-style: none; padding: 0; margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.campaign-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 13px 18px; border-top: 1px solid var(--line); }
+.campaign-list li:first-child { border-top: 0; }
+.campaign-list a { font-weight: 600; color: var(--fg-strong); text-decoration: none; }
+.campaign-list a:hover { color: var(--accent); text-decoration: underline; }
+.campaign-meta { color: var(--fg-dim); font-size: 13px; }
 
 .kind-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
-.btn-new-kind {
-  display: inline-block;
-  padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  text-decoration: none;
-  font-size: 0.82rem;
-  background: var(--surface-2);
-}
-.btn-new-kind:hover { border-color: var(--accent); color: var(--accent-bright); }
+.btn-new-kind { display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--fg-strong); text-decoration: none; font-size: 13px; font-weight: 500; background: var(--panel); }
+.btn-new-kind:hover { background: var(--panel-2); border-color: var(--accent); }
 
 .tree-list { list-style: none; padding-left: 0; margin: 0; }
 .tree-list .tree-list { padding-left: 20px; }
-.tree-dir > span { cursor: pointer; font-weight: 600; }
-.tree-dir > span:hover { color: var(--accent-bright); }
+.tree-dir > span { cursor: pointer; font-weight: 600; color: var(--fg-strong); }
+.tree-dir > span:hover { color: var(--accent); }
 .tree-sub { display: none; }
 .tree-sub.open { display: block; }
-.tree-file a { text-decoration: none; color: var(--text); }
-.tree-file a:hover { color: var(--accent-bright); }
-.tree-list li { padding: 3px 0; }
+.tree-file a { text-decoration: none; color: var(--fg); }
+.tree-file a:hover { color: var(--accent); }
+.tree-list li { padding: 4px 0; }
 
-form label {
-  display: block;
-  margin-bottom: 14px;
-  font-size: 0.85rem;
-  color: var(--text-dim);
-}
-form label input, form label textarea, form label select { display: block; width: 100%; margin-top: 4px; color: var(--text); }
+#app form label { display: block; margin-bottom: 14px; font-size: 13px; color: var(--fg-dim); }
+#app form label input, #app form label textarea, #app form label select { display: block; width: 100%; margin-top: 4px; }
 
-.nn-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
-.status-text { color: var(--text-dim); font-size: 0.82rem; }
+.nn-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.status-text { color: var(--fg-dim); font-size: 13px; }
 
-.note-modal {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-  display: flex; align-items: center; justify-content: center; z-index: 10;
-}
-.note-modal-inner {
-  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  max-width: 640px; width: 90%; max-height: 80vh; overflow-y: auto; padding: 24px; position: relative;
-}
-.note-modal-close {
-  position: absolute; top: 10px; right: 10px; background: transparent; color: var(--text-dim);
-  font-size: 1.4rem; padding: 0 6px;
-}
-.note-modal-download {
-  margin-bottom: 14px; font-size: 0.8rem; padding: 5px 10px;
-}
-.frontmatter-table { width: 100%; margin-bottom: 16px; border-collapse: collapse; font-size: 0.8rem; }
-.frontmatter-table td { padding: 3px 8px; border-bottom: 1px solid var(--border); color: var(--text-dim); }
-.frontmatter-table td:first-child { color: var(--accent-bright); font-family: var(--mono); }
-.note-body h3, .note-body h4, .note-body h5 { margin: 14px 0 6px; }
-.note-body p { margin: 4px 0; line-height: 1.5; }
+/* Note viewer (a modal appended to <body>, cleared on every navigation). */
+.note-modal { position: fixed; inset: 0; background: rgba(4, 8, 12, .6); display: flex; align-items: center; justify-content: center; z-index: 70; }
+.note-modal-inner { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--lift); max-width: 680px; width: 90%; max-height: 80vh; overflow-y: auto; padding: 24px; position: relative; color: var(--fg); }
+.note-modal-close { position: absolute; top: 10px; right: 10px; width: 36px; padding: 0; background: transparent !important; border-color: transparent !important; color: var(--fg-dim); font-size: 22px; line-height: 1; }
+.note-modal-download { margin-bottom: 14px; font-size: 13px; }
+.frontmatter-table { width: 100%; margin-bottom: 16px; border-collapse: collapse; font-size: 13px; }
+.frontmatter-table td { padding: 4px 8px; border-bottom: 1px solid var(--line); color: var(--fg-dim); }
+.frontmatter-table td:first-child { color: var(--accent); font-family: var(--font-mono); }
+.note-body h3, .note-body h4, .note-body h5 { margin: 16px 0 6px; color: var(--fg-strong); }
+.note-body p { margin: 4px 0; line-height: 1.55; }
 .note-body ul { margin: 4px 0; padding-left: 20px; }
-.wikilink { color: var(--text-dim); border-bottom: 1px dotted var(--text-dim); }
-.wikilink-resolved { color: var(--accent-bright); cursor: pointer; border-bottom: 1px dotted var(--accent-bright); }
-.note-embed { max-width: 100%; border-radius: 4px; margin: 8px 0; }
+.wikilink { color: var(--fg-dim); border-bottom: 1px dotted var(--fg-dim); }
+.wikilink-resolved { color: var(--accent); cursor: pointer; border-bottom: 1px dotted var(--accent); }
+.note-embed { max-width: 100%; border-radius: 8px; margin: 8px 0; }
 
-.map-layout { position: relative; display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
-.map-controls { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
-.map-controls label { font-size: 0.78rem; color: var(--text-dim); }
+/* Map generators: controls on the left, the map beside them. */
+.map-layout { position: relative; display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+.map-controls { width: 230px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
+.map-controls label { font-size: 13px; color: var(--fg-dim); }
 .map-controls input, .map-controls select { width: 100%; margin-top: 3px; }
-.map-controls hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
-canvas { background: #000; border: 1px solid var(--border); border-radius: 4px; max-width: 100%; }
+.map-controls hr { border: none; border-top: 1px solid var(--line); margin: 6px 0; width: 100%; }
+/* Maps always draw on black paper, whatever the theme. */
+canvas { background: #000; border: 1px solid var(--line); border-radius: 8px; max-width: 100%; }
+/* Beside the controls the canvas may shrink to fit the row (keeping its shape) instead of wrapping underneath them. */
+.map-layout canvas { flex: 0 1 auto; min-width: 0; height: auto; }
+@media (min-width: 861px) { .map-layout { flex-wrap: nowrap; } }
+#app input[type="checkbox"], #app .map-controls input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; padding: 0; margin: 3px 0; accent-color: var(--accent); }
 
-/* GM reference text for a landmark site (views/map-landmark.js) -- plain
-   prose below the map, not squeezed into the 220px .map-controls column,
-   since it reads far better at full width. */
-.landmark-lore, .dungeon-key, .settlement-poi-panel {
-  max-width: 720px;
-  margin-top: 20px;
-  padding: 16px 20px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-.landmark-lore h3, .dungeon-key h3, .settlement-poi-panel h3 { margin: 0 0 10px; font-size: 1.1rem; }
-.landmark-lore p, .dungeon-key p, .settlement-poi-panel p { margin: 6px 0; line-height: 1.5; }
-.landmark-lore .lore-readaloud { font-style: italic; color: var(--text-dim); }
-.landmark-lore .lore-label { margin: 12px 0 2px; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent-bright); }
+/* GM reference text under a map: landmark lore, dungeon room key, settlement
+   places. Plain prose at full width, not squeezed into the controls column. */
+.landmark-lore, .dungeon-key, .settlement-poi-panel { max-width: 720px; margin-top: 20px; padding: 16px 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.landmark-lore h3, .dungeon-key h3, .settlement-poi-panel h3 { margin: 0 0 10px; }
+.landmark-lore p, .dungeon-key p, .settlement-poi-panel p { margin: 6px 0; line-height: 1.55; }
+.landmark-lore .lore-readaloud { font-style: italic; color: var(--fg-dim); }
+.landmark-lore .lore-label { margin: 14px 0 2px; font-size: 13px; font-weight: 600; color: var(--accent); }
 .landmark-lore ul { margin: 4px 0; padding-left: 20px; }
-.landmark-lore li { margin: 2px 0; line-height: 1.4; }
-
-/* Dungeon room key (views/map-dungeon.js) and the generalized numbered-
-   badge legend (lib/keyed-legend.js, used by views/map-settlement.js's
-   named POIs) -- one entry per numbered location, same panel treatment as
-   .landmark-lore above. Selectors shared across both so a settlement's
-   panel matches the dungeon's own look exactly rather than duplicating
-   the rules. */
-.dungeon-key .key-room, .settlement-poi-panel .key-room { border-top: 1px solid var(--border); padding-top: 6px; }
+.landmark-lore li { margin: 2px 0; line-height: 1.45; }
+.dungeon-key .key-room, .settlement-poi-panel .key-room { border-top: 1px solid var(--line); padding-top: 6px; }
 .dungeon-key .key-room:first-of-type, .settlement-poi-panel .key-room:first-of-type { border-top: none; padding-top: 0; }
-.dungeon-key .key-room-num, .settlement-poi-panel .key-room-num {
-  display: inline-block; min-width: 1.4em; text-align: center;
-  color: var(--accent-bright); font-family: var(--mono); font-size: 0.85rem;
-}
+.dungeon-key .key-room-num, .settlement-poi-panel .key-room-num { display: inline-block; min-width: 1.5em; text-align: center; color: var(--accent); font-family: var(--font-mono); font-size: 14px; }
 
-/* Generation-progress overlay (lib/generation-progress.js) -- absolutely
-   positioned over a generator's own canvas (inline left/top/width set per
-   canvas at creation time, since .map-layout is a flex row that can't
-   otherwise tell this overlay where the canvas itself actually sits). */
-.gen-progress-overlay {
-  position: absolute;
-  background: rgba(20, 18, 15, 0.85);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 0.72rem;
-  color: var(--text);
-  pointer-events: none;
-}
+/* Generation-progress overlay (lib/generation-progress.js), positioned over a
+   generator's own canvas. */
+.gen-progress-overlay { position: absolute; background: color-mix(in srgb, var(--panel) 90%, transparent); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 12px; color: var(--fg); pointer-events: none; }
 .gen-progress-label { margin-bottom: 4px; }
-.gen-progress-track { height: 5px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
-.gen-progress-fill { height: 100%; width: 0%; background: var(--accent-bright); transition: width 0.15s linear; }
+.gen-progress-track { height: 5px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+.gen-progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .15s linear; }
 
-/* Settlement notable-locations panel (views/map-settlement.js) -- empty and
-   collapses to nothing (via :empty) when a town has no eligible POIs. */
+/* The settlement places panel collapses to nothing when a town has none. */
 .settlement-poi-panel:empty { display: none; margin-top: 0; padding: 0; border: none; }
 
-/* Direct in-browser printing (e.g. of a print-tile grid render, see
-   map-overworld.js's tile export) -- secondary to the zip-of-PNGs delivery
-   path, but the map itself should still print cleanly if the user just
-   hits print on the page. */
+@media (max-width: 860px) {
+  .nav-link { min-height: 44px; padding: 0 12px; }
+  .map-controls { width: 100%; }
+  #app input, #app textarea, #app select, #app button, .btn-new-kind { min-height: 44px; }
+  .note-modal-close { width: 44px; height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) { .gen-progress-fill { transition: none; } }
+
+/* Printing a map should print the map: no shell, no controls. */
 @media print {
-  .app-header, .map-controls, .landmark-lore, .dungeon-key, .settlement-poi-panel { display: none; }
-  main:has(.map-layout) { max-width: none; }
+  .side, .top, .settings, .toast, .page-head, .map-controls, .landmark-lore, .dungeon-key, .settlement-poi-panel, .bg { display: none !important; }
+  .app { display: block; }
+  .content { max-width: none; padding: 0; }
+  #app { max-width: none; }
   .map-layout { display: block; }
   canvas { max-width: 100%; width: 100%; height: auto; border: none; }
+  body { background: #fff; }
 }
