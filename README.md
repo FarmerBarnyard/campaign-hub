@@ -65,6 +65,14 @@ the note by hand. Either way, nothing is written until you click **Save**,
 which always refuses to overwrite an existing note (inline error instead) so
 nothing already generated can be silently clobbered.
 
+## Shared shell and themes (2026-10-08)
+
+The app now sits in the same shell as the dashboard: a left sidebar (Overview, Ops board, Study, Campaign, Stocks), a top bar (jump search, light/dark, Settings) and a Settings panel with 18 colour themes, 18 page backgrounds, density and sidebar options. The choice follows you between barnyard.site pages through a small `bh_prefs` cookie (look-and-feel keys only, validated on read).
+
+- `themes.js`, `shell.js`, `shell.css` and `fonts/` are **hand-copied unchanged from barnyard-hub**, like `auth-gate.js`. Change them there and copy them out again. `test/shell.test.js` checks them (every theme readable in both modes, every background has CSS, the page stays inside its CSP). Run it with `node test/shell.test.js`.
+- `styles.css` is now only this app's layout and the class names its views use; colours come from the shell's tokens. The old header is gone: Library, Dungeon map and Overworld map are a tab strip under the page title (`app.js` marks the current one).
+- Maps still draw on black paper whatever the theme. Beside the controls the canvas may now shrink to fit the row, keeping its shape (the overworld's pointer maths already scales by the canvas's on-screen size).
+- Script order matters: `themes.js` in `<head>`, `shell.js` before `auth-gate.js` (it creates `#auth-status`). All script and stylesheet tags share the `?v=50` cache-bust.
 ## Map generator
 
 Two independent modes (not linked to content generation):
