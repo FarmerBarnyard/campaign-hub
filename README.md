@@ -92,3 +92,7 @@ The copied `themes.js` now also syncs the look-and-feel settings with the signed
 ### Hides what a guest cannot use (2026-10-08)
 
 The copied `themes.js` now also reads the Worker's `/auth/session` (`BarnyardTheme.who`: signed in, hub owner or not, which apps their groups allow), and `shell.js` hides the **Study** and **Campaign** links (and their jump-search results) from a signed-in person whose groups don't include them. It is a display hint only, fails open when unknown, and every route still checks its own group. `themes.js`, `shell.js` and `shell.css` are hand-copied unchanged from `barnyard-hub`; do not edit them here.
+
+### Reads send the login cookie (2026-10-08)
+
+`lib/api.js` now sends the login cookie on reads (`Api.get`) as well as writes, so a signed-in guest reads their own campaigns: the Worker (ClaudeRepo PR 307) gives each signed-in guest in the Campaign group their own space for notes, images and daily limits. Not signed in, nothing is sent and reads are the open, shared space exactly as before. `node test/api.test.js` guards it.
