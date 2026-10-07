@@ -84,3 +84,7 @@ Both let you regenerate with a new seed, export a PNG directly to your
 downloads, or save into the active campaign on the server. Map saves never
 auto-edit any note — you get the exact `![[filename.png]]` text to paste in
 yourself.
+
+### Settings follow the signed-in user (2026-10-07)
+
+The copied `themes.js` now also syncs the look-and-feel settings with the signed-in user's profile (Worker `GET/PUT/DELETE /prefs`), so a theme chosen in one browser loads in any other. `shell.js` shows the status in the Settings footer (a **Sign in** link when signed out, **Remove saved profile**). Nothing is sent when signed out. `themes.js`, `shell.js` and `shell.css` are hand-copied unchanged from `barnyard-hub`; do not edit them here.
