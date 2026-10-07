@@ -1,13 +1,50 @@
+// Climate-band thresholds for the temperature axis below -- not slider-
+// biased (there's no live control for climate, only Vegetation/Ruggedness),
+// so these stay plain module constants rather than per-call parameters.
+// tOf (0 = coldest, 1 = hottest) comes from buildWorld's per-seed randomized
+// equator-line field; biomeAt just consumes it as a third independent axis.
+const OW_COLD_TEMP_T = 0.32;
+const OW_HOT_TEMP_T = 0.68;
+// Swamp/wetland override: a low-elevation, very-high-moisture pocket,
+// independent of climate band (real wetlands range from tropical mangrove
+// swamp to temperate marsh to sub-arctic bog alike). Narrower than the
+// hills cutoff below so it only ever claims low ground near the coast/
+// floodplain, never competing with taiga/jungle/forest's own much larger
+// footprint.
+const OW_SWAMP_HEIGHT_OFFSET = 0.06;
+const OW_SWAMP_MOIST_T = 0.66;
+
 // forestBias/ruggedBias let the live Vegetation/Ruggedness sliders (Phase 9)
-// shift the moisture and height thresholds without touching the height or
-// moisture fields themselves -- the terrain's actual shape never changes,
-// only where the biome lines fall on it. Thresholds are floored relative to
-// each other (and to seaLevel) rather than shifted freely, so a slider
-// dragged to its extreme can never invert or collapse the ordering into a
-// degenerate all-one-biome map.
-function biomeAt(h, moist, seaLevel, forestBias, ruggedBias) {
+// shift the moisture and height thresholds without touching the height,
+// moisture, or temperature fields themselves -- the terrain's actual shape
+// never changes, only where the biome lines fall on it. Thresholds are
+// floored relative to each other (and to seaLevel) rather than shifted
+// freely, so a slider dragged to its extreme can never invert or collapse
+// the ordering into a degenerate all-one-biome map.
+//
+// Three independent axes (height, moisture, temperature) drive
+// classification, Whittaker-diagram style, rather than the old height+
+// moisture-only scheme: height still gates water/beach/hills/mountains/
+// snow exactly as before (temperature does NOT reshape those bands --
+// the render pipeline extracts hills/mountains/snow as a single
+// marching-squares pass over the raw height field, so keeping their
+// thresholds purely height-driven keeps that pass, and every other
+// hillsT/mountainsT/snowT copy in this file, correct with zero further
+// changes). Below the hills line, the SAME moisture thresholds
+// (wetT/aridT/veryAridT) apply in every climate band, just resolving to a
+// different named biome per band -- cold+wet is taiga where temperate+wet
+// is forest is hot+wet is jungle, etc. -- so forestBias still means exactly
+// what it always meant ("more/less vegetation") everywhere on the map, not
+// just in one climate.
+function biomeAt(h, moist, temp, seaLevel, forestBias, ruggedBias) {
   forestBias = forestBias || 0;
   ruggedBias = ruggedBias || 0;
+  // Callers with no temperature field of their own (views/map-detail.js's
+  // smaller local generator doesn't compute one) get a neutral mid-value,
+  // which keeps them entirely in the temperate band -- the same
+  // forest/plains/barrens/steppe (+ swamp) results this function always
+  // produced for them, just via the new signature.
+  temp = temp === undefined ? 0.5 : temp;
   if (h < seaLevel - 0.08) return 'deepwater';
   if (h < seaLevel) return 'shallowwater';
   if (h < seaLevel + 0.03) return 'beach';
@@ -17,19 +54,76 @@ function biomeAt(h, moist, seaLevel, forestBias, ruggedBias) {
   if (h > snowT) return 'snow';
   if (h > mountainsT) return 'mountains';
   if (h > hillsT) return 'hills';
-  const forestT = Math.min(0.9, Math.max(0.1, 0.5 - forestBias));
-  // Barrens mirrors forestT's own pattern at the opposite end of the
-  // moisture range (floored strictly below forestT so forestBias can never
+
+  // Swamp check first: it can override any lowland climate band.
+  if (h < seaLevel + OW_SWAMP_HEIGHT_OFFSET && moist > OW_SWAMP_MOIST_T) return 'swamp';
+
+  const wetT = Math.min(0.9, Math.max(0.1, 0.5 - forestBias));
+  // Barrens/desert mirrors wetT's own pattern at the opposite end of the
+  // moisture range (floored strictly below wetT so forestBias can never
   // push the two thresholds past each other into a degenerate ordering) --
   // an arid lowland base biome, previously missing entirely (moisture below
-  // forestT always fell through to plains regardless of how dry). Needed as
+  // wetT always fell through to plains regardless of how dry). Needed as
   // the base for the Bloodstone Desert / Salt Flats special-zone reflavors,
   // which recolor barrens cells rather than inventing their own band.
-  const aridT = Math.max(0, Math.min(forestT - 0.15, 0.22 - forestBias * 0.5));
-  if (moist > forestT) return 'forest';
-  if (moist < aridT) return 'barrens';
+  const aridT = Math.max(0, Math.min(wetT - 0.15, 0.22 - forestBias * 0.5));
+  // A second, stricter threshold below aridT -- carves barrens/desert down
+  // to just the driest extreme (previously barrens alone owned everything
+  // below aridT) and opens up a mid-dry band for the new steppe/savanna
+  // dry-grassland categories, floored at 0 and strictly below aridT so
+  // forestBias can never invert the two.
+  const veryAridT = Math.max(0, aridT - 0.12);
+
+  if (temp < OW_COLD_TEMP_T) {
+    // Cold band: taiga (cold forest) vs. tundra, split at the same wetT
+    // line temperate forest uses -- no separate arid tundra tier, since a
+    // cold+dry cell already reads as tundra regardless of exactly how dry.
+    return moist >= wetT ? 'taiga' : 'tundra';
+  }
+  if (temp >= OW_HOT_TEMP_T) {
+    // Hot band: jungle / savanna / desert, mirroring the temperate band's
+    // forest / plains+steppe / barrens structure one-for-one.
+    if (moist >= wetT) return 'jungle';
+    if (moist < veryAridT) return 'desert';
+    return 'savanna';
+  }
+  // Temperate band (the original 3-way split, now with a steppe tier
+  // carved out of what used to be the single "everything below aridT"
+  // barrens band).
+  if (moist >= wetT) return 'forest';
+  if (moist < veryAridT) return 'barrens';
+  if (moist < aridT) return 'steppe';
   return 'plains';
 }
+
+// Land biome categories rendered as a watercolor-wash overlay region
+// (lib/watercolor-wash.js) on top of the flat land fill, one pass per
+// category, each masked straight from biomeAt's own output via
+// `cellData[i].biome === b` -- replaces the old hand-duplicated per-biome
+// moisture-threshold masks (landForestAt/landBarrensAt), which only ever
+// covered 2 of what are now 9 washed categories and had to keep their own
+// copy of biomeAt's thresholds in sync by hand. `plains` is deliberately
+// excluded: it stays the flat, unwashed base land color everything else
+// paints over. `hills`/`mountains`/`snow` are also excluded: those remain
+// a single combined height-driven wash (see the highland wash below),
+// unchanged.
+const OW_LOWLAND_WASH_BIOMES = ['forest', 'taiga', 'jungle', 'swamp', 'savanna', 'steppe', 'barrens', 'desert', 'tundra'];
+
+// Relative cost of routing a road through each biome -- plains/beach are
+// cheap, forest and hills cost more, mountains and snow cost the most.
+// New climate biomes slot in near their nearest existing analog: open dry
+// grassland (steppe/savanna) costs about what plains/beach already do,
+// dense growth (taiga/jungle) costs more like forest, and the harshest
+// ground (desert heat, tundra exposure, swamp mud) costs more than that --
+// swamp specifically sits with snow/mountains, the two existing worst-case
+// terrains, since boggy ground is genuinely one of the hardest surfaces to
+// route a road through. Water isn't listed because computeRoadPath excludes
+// water cells from the routable graph entirely (roads in this world don't
+// cross open water).
+const OW_TERRAIN_ROAD_COST = {
+  beach: 1.2, plains: 1, forest: 1.3, hills: 2, mountains: 4, snow: 2.5, barrens: 1.5,
+  steppe: 1.1, savanna: 1.2, desert: 1.8, tundra: 1.6, taiga: 1.6, jungle: 2.2, swamp: 2.8,
+};
 
 // Per-biome decorative texture drawn on top of the flat fill, using a
 // dedicated rng consumed strictly in raster (row-major) order -- so it's
@@ -37,25 +131,30 @@ function biomeAt(h, moist, seaLevel, forestBias, ruggedBias) {
 // which happens afterward against the (already-final) biome grid. Gated by
 // probability per biome so it reads as texture/iconography, not a solid
 // carpet of icons.
-function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink, canopyColor) {
+//
+// `biomeColors` is the theme's whole palette.biomes dict (not just
+// forest's own flat color) -- every canopy-shaded case below (forest,
+// taiga, jungle) looks up its OWN biome's flat color to drive
+// drawTreeCluster's light/dark/highlight shading, rather than every one of
+// them borrowing forest's tone the way the old single-biome `canopyColor`
+// parameter forced. `ink` alone has no color information to shade with.
+function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink, biomeColors) {
   const r = rng();
+  const canopyOf = (key, fallback) => (biomeColors && biomeColors[key]) || fallback;
   switch (biome) {
     case 'forest': {
       // Pom-pom tree clusters (lib/tree-clusters.js) -- replaces the old
       // two-tier conifer triangle. Confirmed directly against a real
       // Phandalin crop: WotC's own forest texture is a scatter of round,
       // overlapping, individually-lit canopy clusters, not a flat
-      // silhouette. `canopyColor` (the theme's own flat forest fill,
-      // e.g. palette.biomes.forest) drives the cluster's light/dark/
-      // highlight shading -- `ink` alone has no color information to
-      // shade with.
+      // silhouette.
       if (r > 0.85) return;
       const standCount = 1 + Math.floor(rng() * 2);
       for (let t = 0; t < standCount; t++) {
         const tx = cx + (rng() - 0.5) * cw * 0.6;
         const ty = cy + (rng() - 0.5) * ch * 0.4;
         const size = Math.min(cw, ch) * (0.32 + rng() * 0.18);
-        drawTreeCluster(ctx, tx, ty, size, rng, canopyColor || '#4a6b3a', ink);
+        drawTreeCluster(ctx, tx, ty, size, rng, canopyOf('forest', '#4a6b3a'), ink);
       }
       break;
     }
@@ -123,6 +222,181 @@ function paintBiomeTexture(ctx, biome, cx, cy, cw, ch, rng, ink, canopyColor) {
       ctx.moveTo(cx - s, cy + s * 0.6); ctx.lineTo(cx + s, cy - s * 0.6);
       ctx.moveTo(cx - s * 0.3, cy - s); ctx.lineTo(cx + s * 0.5, cy + s * 0.8);
       ctx.stroke();
+      ctx.globalAlpha = 1;
+      break;
+    }
+    case 'taiga': {
+      // Narrow dark conifer silhouette -- deliberately the OLD two-tier
+      // triangle shape forest itself moved away from (see the round
+      // pom-pom clusters above): now that it's free, it's a good fit for
+      // "cold, spiky, coniferous" read as distinct from temperate forest's
+      // round leafy canopy.
+      if (r > 0.75) return;
+      const standCount = 1 + Math.floor(rng() * 2);
+      for (let t = 0; t < standCount; t++) {
+        const tx = cx + (rng() - 0.5) * cw * 0.6;
+        const ty = cy + (rng() - 0.5) * ch * 0.35;
+        const s = Math.min(cw, ch) * (0.22 + rng() * 0.12);
+        ctx.fillStyle = canopyOf('taiga', '#3a5a4c');
+        ctx.beginPath();
+        ctx.moveTo(tx, ty - s * 1.3); ctx.lineTo(tx - s * 0.32, ty - s * 0.3); ctx.lineTo(tx + s * 0.32, ty - s * 0.3);
+        ctx.closePath(); ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(tx, ty - s * 0.5); ctx.lineTo(tx - s * 0.42, ty + s * 0.5); ctx.lineTo(tx + s * 0.42, ty + s * 0.5);
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.6;
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      break;
+    }
+    case 'jungle': {
+      // Dense overlapping canopy -- a bigger, darker, denser variant of
+      // the forest pom-pom cluster (more stands, larger overlap, its own
+      // deep-green tone) so a jungle mass reads as thick and crowded next
+      // to forest's more open scatter.
+      if (r > 0.55) return;
+      const standCount = 2 + Math.floor(rng() * 3);
+      for (let t = 0; t < standCount; t++) {
+        const tx = cx + (rng() - 0.5) * cw * 0.75;
+        const ty = cy + (rng() - 0.5) * ch * 0.55;
+        const size = Math.min(cw, ch) * (0.4 + rng() * 0.24);
+        drawTreeCluster(ctx, tx, ty, size, rng, canopyOf('jungle', '#1f5c34'), ink);
+      }
+      break;
+    }
+    case 'swamp': {
+      // Reed-tuft clusters (a few thin fanned blades) plus an occasional
+      // small water glint -- reads as "wet ground with standing water
+      // pockets," distinct from both plains' single grass tick and
+      // forest/jungle's canopy shapes.
+      if (r < 0.55) {
+        const reedCount = 2 + Math.floor(rng() * 2);
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.45;
+        ctx.lineWidth = 1;
+        for (let t = 0; t < reedCount; t++) {
+          const tx = cx + (rng() - 0.5) * cw * 0.7;
+          const ty = cy + (rng() - 0.5) * ch * 0.5;
+          const s = cw * (0.14 + rng() * 0.1);
+          ctx.beginPath();
+          ctx.moveTo(tx, ty + s * 0.5); ctx.quadraticCurveTo(tx - s * 0.15, ty - s * 0.3, tx - s * 0.35, ty - s);
+          ctx.moveTo(tx, ty + s * 0.5); ctx.lineTo(tx, ty - s);
+          ctx.moveTo(tx, ty + s * 0.5); ctx.quadraticCurveTo(tx + s * 0.15, ty - s * 0.3, tx + s * 0.35, ty - s);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      } else if (r < 0.72) {
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.3;
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.max(0.8, cw * 0.09), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      break;
+    }
+    case 'savanna': {
+      // Long wind-swept grass-dash strokes (longer/more curved than
+      // plains' single lean tick), with a rare isolated umbrella-canopy
+      // tree silhouette standing alone -- the classic savanna read.
+      if (r < 0.4) {
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.4;
+        ctx.lineWidth = 1;
+        for (let t = 0; t < 2; t++) {
+          const tx = cx + (rng() - 0.5) * cw * 0.7;
+          const ty = cy + (rng() - 0.5) * ch * 0.5;
+          const lean = cw * (0.22 + rng() * 0.14);
+          ctx.beginPath();
+          ctx.moveTo(tx - lean * 0.5, ty + ch * 0.12);
+          ctx.quadraticCurveTo(tx, ty - ch * 0.05, tx + lean * 0.5, ty - ch * 0.14);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      } else if (r < 0.48) {
+        const s = Math.min(cw, ch) * 0.22;
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + s * 0.9); ctx.lineTo(cx, cy - s * 0.2);
+        ctx.stroke();
+        ctx.fillStyle = canopyOf('savanna', '#c68a35');
+        ctx.beginPath();
+        ctx.ellipse(cx, cy - s * 0.35, s * 0.6, s * 0.22, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      break;
+    }
+    case 'steppe': {
+      // Shorter, more numerous wind-dash strokes than savanna, no trees --
+      // open dry grassland rather than scattered-tree grassland.
+      if (r > 0.45) return;
+      ctx.strokeStyle = ink;
+      ctx.globalAlpha = 0.4;
+      ctx.lineWidth = 0.8;
+      const tickCount = 2 + Math.floor(rng() * 2);
+      for (let t = 0; t < tickCount; t++) {
+        const tx = cx + (rng() - 0.5) * cw * 0.75;
+        const ty = cy + (rng() - 0.5) * ch * 0.6;
+        const lean = cw * (0.12 + rng() * 0.08);
+        ctx.beginPath();
+        ctx.moveTo(tx - lean * 0.5, ty + ch * 0.08);
+        ctx.lineTo(tx + lean * 0.5, ty - ch * 0.1);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      break;
+    }
+    case 'desert': {
+      // Sparse dune-line hachure (a shallow curved sweep, echoing
+      // lib/hachure-terrain.js's contour-following strokes at a much
+      // smaller per-point scale) with an occasional lone scrub tick.
+      if (r < 0.4) {
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.3;
+        ctx.lineWidth = 0.8;
+        const dw = cw * (0.35 + rng() * 0.2);
+        const dy = (rng() - 0.5) * ch * 0.4;
+        ctx.beginPath();
+        ctx.moveTo(cx - dw, cy + dy + ch * 0.08);
+        ctx.quadraticCurveTo(cx, cy + dy - ch * 0.08, cx + dw, cy + dy + ch * 0.08);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      } else if (r < 0.5) {
+        ctx.strokeStyle = ink;
+        ctx.globalAlpha = 0.3;
+        ctx.lineWidth = 0.8;
+        const s = cw * 0.06;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + s); ctx.lineTo(cx, cy - s * 0.4);
+        ctx.moveTo(cx, cy - s * 0.1); ctx.lineTo(cx - s * 0.5, cy - s * 0.6);
+        ctx.moveTo(cx, cy - s * 0.1); ctx.lineTo(cx + s * 0.5, cy - s * 0.6);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      break;
+    }
+    case 'tundra': {
+      // Sparse lichen/stipple texture -- a loose scatter of tiny dots,
+      // lighter and more diffuse than beach's single dot, reading as
+      // "sparse ground cover" rather than a distinct plant or grain.
+      if (r > 0.4) return;
+      ctx.fillStyle = ink;
+      ctx.globalAlpha = 0.3;
+      const dotCount = 2 + Math.floor(rng() * 3);
+      for (let t = 0; t < dotCount; t++) {
+        const tx = cx + (rng() - 0.5) * cw * 0.8;
+        const ty = cy + (rng() - 0.5) * ch * 0.8;
+        ctx.beginPath();
+        ctx.arc(tx, ty, Math.max(0.4, cw * 0.025), 0, Math.PI * 2);
+        ctx.fill();
+      }
       ctx.globalAlpha = 1;
       break;
     }
@@ -345,11 +619,9 @@ function drawWildZoneIcon(ctx, x, y, key, ink) {
   ctx.restore();
 }
 
-// Relative cost of routing a road through each biome -- plains/beach are
-// cheap, forest and hills cost more, mountains and snow cost the most.
-// Water isn't listed because computeRoadPath excludes water cells from the
-// routable graph entirely (roads in this world don't cross open water).
-const OW_TERRAIN_ROAD_COST = { beach: 1.2, plains: 1, forest: 1.3, hills: 2, mountains: 4, snow: 2.5, barrens: 1.5 };
+// (OW_TERRAIN_ROAD_COST now lives up near biomeAt/OW_LOWLAND_WASH_BIOMES,
+// grouped with the rest of the biome-classification constants it depends
+// on.)
 
 // Binary min-heap keyed by `.dist`, used only by computeRoadPath below.
 function MinHeap() { this.a = []; }
@@ -454,11 +726,14 @@ function hexLightness(hex) {
 // parchment/modern's light terrain, light ink on grim's dark terrain).
 // Plains/beach/snow/water fall back to the theme's plain label ink,
 // matching how those biomes keep their original flat, unwashed treatment.
+// Generalized to any biome with a matching palette.wash entry (mountains
+// special-cased to hills' own wash tone, since the two share one combined
+// terrain wash -- see OW_LOWLAND_WASH_BIOMES/the highland wash above) --
+// picks up every new climate biome (taiga/jungle/swamp/savanna/steppe/
+// desert/tundra) for free rather than needing its own hand-listed case.
 function labelColorFor(biome, palette) {
-  const tone = biome === 'forest' ? palette.wash.forest
-    : (biome === 'hills' || biome === 'mountains') ? palette.wash.hills
-    : biome === 'barrens' ? palette.wash.barrens
-    : null;
+  const washKey = biome === 'mountains' ? 'hills' : biome;
+  const tone = palette.wash[washKey] || null;
   if (!tone) return palette.label;
   const themeIsDark = hexLightness(palette.label) > 50;
   const targetL = themeIsDark ? Math.min(92, tone.l + 45) : Math.max(8, tone.l - 22);
@@ -497,6 +772,13 @@ function drawMapLegend(ctx, canvas, palette, activeZones) {
     { type: 'swatch', color: palette.biomes.mountains, label: 'Mountains' },
     { type: 'swatch', color: palette.biomes.snow, label: 'Snow' },
     { type: 'swatch', color: palette.biomes.barrens, label: 'Barrens' },
+    { type: 'swatch', color: palette.biomes.steppe, label: 'Steppe' },
+    { type: 'swatch', color: palette.biomes.savanna, label: 'Savanna' },
+    { type: 'swatch', color: palette.biomes.desert, label: 'Desert' },
+    { type: 'swatch', color: palette.biomes.tundra, label: 'Tundra' },
+    { type: 'swatch', color: palette.biomes.taiga, label: 'Taiga' },
+    { type: 'swatch', color: palette.biomes.jungle, label: 'Jungle' },
+    { type: 'swatch', color: palette.biomes.swamp, label: 'Swamp' },
     { type: 'icon', tier: 'village', label: 'Village' },
     { type: 'icon', tier: 'town', label: 'Town' },
     { type: 'icon', tier: 'city', label: 'City' },
@@ -1280,6 +1562,46 @@ function renderOverworldMap(container) {
     applyThermalErosion(heights, cols, rows, 3, 0.025, 0.5);
     fillPits(heights, cols, rows, seaLevel);
 
+    // Temperature field (0 = coldest, 1 = hottest) -- computed alongside
+    // heights/mOf, post-erosion, so the altitude-cooling term below reads
+    // the final terrain rather than the pre-erosion noise field. Not wired
+    // into biomeAt() itself (that's owned by a separate biome-classification
+    // effort) -- this just guarantees tOf[i] exists, populated, indexed the
+    // same way as heights[i]/mOf[i], by the time biomeAt's call sites run.
+    // Standard "latitude minus altitude plus noise" recipe, with one twist:
+    // instead of hardcoding y as the north-south axis (which would make
+    // every world cold-north/hot-south identically), each seed rolls its
+    // own "equator line" -- an angle through the map center plus a small
+    // perpendicular offset -- and temperature is hottest ON that line,
+    // falling off toward either side of it (i.e. two "poles," same as real
+    // latitude, just at a random orientation/offset per seed instead of
+    // always the top/bottom canvas edges).
+    const tempRng = mulberry32(seed + 51413);
+    const equatorAngle = tempRng() * Math.PI * 2;
+    const equatorNx = Math.sin(equatorAngle), equatorNy = -Math.cos(equatorAngle); // unit normal to the equator line
+    const equatorOffset = (tempRng() - 0.5) * 0.6; // fraction of maxD, shifts the hot band off-center
+    // Own seeded noise stream (5-6 digit constant not used elsewhere in this
+    // file) for small regional temperature variation, same makeFbmSampler
+    // convention as moistureSample above.
+    const tempNoiseSample = makeFbmSampler(mulberry32(seed + 62909), 3);
+    const tOf = new Float64Array(mesh.cells.length);
+    mesh.cells.forEach((cell, i) => {
+      const dx = cell.x - cx, dy = cell.y - cy;
+      // Signed distance from the equator line, normalized so the canvas
+      // corners land at roughly +/-1.
+      const latSigned = (dx * equatorNx + dy * equatorNy) / maxD - equatorOffset;
+      // 1 at the equator line, fading to 0 at either "pole" -- a band, not a
+      // corner-to-corner ramp, so temperature wraps the way real latitude
+      // does rather than reading as one hot edge and one cold edge.
+      const latitude = Math.max(0, 1 - Math.abs(latSigned));
+      // Higher elevation reads colder at the same latitude -- strong enough
+      // that a tall mountain can read as cold even sitting on the equator
+      // line itself, not just nudge the value slightly.
+      const altitudeCooling = Math.max(0, heights[i] - seaLevel) * 0.85;
+      const regionalNoise = (tempNoiseSample(cell.x / canvas.width, cell.y / canvas.height) - 0.5) * 0.25;
+      tOf[i] = Math.max(0, Math.min(1, latitude - altitudeCooling + regionalNoise));
+    });
+
     // Naming regions: generic adjacency BFS, independent of biome/height
     // beyond the adjacency graph itself.
     const regionRng = mulberry32(seed + 22222);
@@ -1322,8 +1644,11 @@ function renderOverworldMap(container) {
     // character (a drier interior, a wetter coast) instead of one
     // statistically-uniform field repeated everywhere -- blended directly
     // into `m` rather than threaded through biomeAt as a new parameter,
-    // since biomeAt only ever compares `moist > forestT` regardless of
-    // where that moisture value came from.
+    // since biomeAt only ever compares moisture against its own internal
+    // wetT/aridT lines regardless of where that moisture value came from.
+    // tOf (built above) is threaded through as biomeAt's third axis --
+    // refBiomeOf is the bias-independent reference classification, same
+    // temperature value the LIVE `biome` field in generate() below uses.
     const moistureSample = makeFbmSampler(mulberry32(seed + 99991), Math.max(1, octaves - 1));
     const regionalMoisture = rangeCount > 1 ? makeFbmSampler(mulberry32(seed + 91919), 2) : null;
     const mOf = new Float64Array(mesh.cells.length);
@@ -1336,7 +1661,7 @@ function renderOverworldMap(container) {
       }
       m = Math.min(1, m + nearRiver[i] * 0.3);
       mOf[i] = m;
-      refBiomeOf[i] = biomeAt(heights[i], m, seaLevel, 0, 0);
+      refBiomeOf[i] = biomeAt(heights[i], m, tOf[i], seaLevel, 0, 0);
     });
 
     // Wetlowland: a derived flag, not a new base biome (Bone Marsh/Feywild
@@ -1589,7 +1914,7 @@ function renderOverworldMap(container) {
 
     worldCache = {
       key, mesh, heights, cols, rows, cellW, cellH,
-      mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
+      mOf, tOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
       regionOf, regionCategory, settlements, roadPaths,
       wetlowlandOf, rangeIndexOf, rangeZoneOf, regionZoneOf,
       lakeIdOf, largestLakeId, landmarks,
@@ -1690,16 +2015,19 @@ function renderOverworldMap(container) {
     const theme = MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
     const palette = theme.overworld;
 
-    // Thresholds mirror biomeAt's own internal formulas exactly (kept in
-    // sync by hand -- biomeAt still owns per-cell classification for
-    // settlement/road/theme-suggestion logic below; these copies are only
-    // for driving marching-squares contour extraction against the same
-    // continuous fields).
+    // hillsT/mountainsT/snowT mirror biomeAt's own internal height
+    // formulas exactly (kept in sync by hand -- biomeAt still owns
+    // per-cell classification for settlement/road/theme-suggestion logic
+    // below; these copies are only for driving marching-squares contour
+    // extraction against the same continuous height field, for the highland
+    // wash/rosette-threshold/snow-fill/range-zone passes below). The old
+    // forestT/aridT copies are gone: the lowland biome washes below now
+    // extract straight from cellData[i].biome (biomeAt's own output) rather
+    // than a hand-duplicated moisture-threshold formula, so there's nothing
+    // left to keep in sync for those.
     const hillsT = Math.max(seaLevel + 0.08, 0.55 - ruggedBias);
     const mountainsT = Math.max(hillsT + 0.05, 0.7 - ruggedBias);
     const snowT = Math.max(mountainsT + 0.05, 0.85 - ruggedBias);
-    const forestT = Math.min(0.9, Math.max(0.1, 0.5 - forestBias));
-    const aridT = Math.max(0, Math.min(forestT - 0.15, 0.22 - forestBias * 0.5));
 
     // Dedicated rngs for every LIVE (per-render) generative concern --
     // biome texture, wash, grain, border -- fully isolated from each other
@@ -1728,7 +2056,7 @@ function renderOverworldMap(container) {
     const world = buildWorld(seed, cellCount, octaves, island, seaLevel, riversOn, settleCount, wildZonesOn);
     const {
       mesh, heights, cols, rows, cellW, cellH,
-      mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
+      mOf, tOf, refBiomeOf, flow, downhill, isLake, riverThreshold, nearRiver,
       regionOf, regionCategory, settlements, roadPaths,
       wetlowlandOf, rangeIndexOf, rangeZoneOf, regionZoneOf,
       lakeIdOf, largestLakeId, landmarks,
@@ -1745,8 +2073,8 @@ function renderOverworldMap(container) {
     // so dragging a slider only repaints the terrain's coloring and never
     // moves a settlement, renames a region, or reroutes a road.
     const cellData = mesh.cells.map((cell, i) => ({
-      cell, h: heights[i], m: mOf[i],
-      biome: biomeAt(heights[i], mOf[i], seaLevel, forestBias, ruggedBias),
+      cell, h: heights[i], m: mOf[i], t: tOf[i],
+      biome: biomeAt(heights[i], mOf[i], tOf[i], seaLevel, forestBias, ruggedBias),
       refBiome: refBiomeOf[i],
     }));
 
@@ -1809,56 +2137,39 @@ function renderOverworldMap(container) {
         const px = sx + (textureRng() - 0.5) * spacing * 0.6;
         const py = sy + (textureRng() - 0.5) * spacing * 0.6;
         const biome = biomeAtPoint(px, py);
-        if (biome === 'hills' || biome === 'mountains' || biome === 'forest' || biome === 'barrens') continue; // wash+icon pass below, gated by !fast
-        paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes.forest);
+        if (biome === 'hills' || biome === 'mountains' || OW_LOWLAND_WASH_BIOMES.includes(biome)) continue; // wash+icon pass below, gated by !fast
+        paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes);
       }
     }
 
     if (!fast) {
       await yieldToPaint();
       progress.update(0.4, 'Painting highlands & forests…');
-      // Forest wash: a contour on MOISTURE (not height) -- but moisture
-      // itself is sampled over the WHOLE canvas independent of land/water
-      // (unlike height, it was never masked to the landmass), so a raw
-      // moisture threshold can flag a high-moisture patch out in open
-      // ocean, far from any coastline. Such a patch routinely touches all
-      // four canvas edges (nothing ties it to where the actual coastline
-      // is), and border-stitching that into a loop produced a near-
-      // full-canvas region that then got misread as almost entirely
-      // "hole" once grouped -- the forest wash silently painted nothing
-      // anywhere, confirmed by sampling known forest cells and finding
-      // the plains color underneath instead. Masking moisture to land
-      // (anything below the beach-or-higher threshold reads as
-      // definitely-not-forest) before extraction keeps the resulting
-      // region inherently bounded by the real coastline, so it only ever
-      // touches the border when the LAND itself does -- the case
-      // border-stitching is actually meant to handle.
-      const landForestAt = (i) => (heights[i] >= seaLevel + 0.03 ? cellData[i].m : -1);
-      const forestLoops = extractFillableRegions(cols, rows, cellW, cellH, landForestAt, forestT, canvas.width, canvas.height, minLoopArea);
-      if (forestLoops.length > 0) {
+      // Lowland biome washes: one overlay region per non-plains lowland
+      // category -- temperate forest/barrens plus the newer climate-driven
+      // taiga/jungle/swamp/savanna/steppe/desert/tundra (OW_LOWLAND_WASH_
+      // BIOMES) -- each masked straight from cellData[i].biome, i.e. the
+      // SAME classification driving the texture/legend/settlement logic
+      // elsewhere, rather than a hand-rolled moisture-threshold copy of
+      // biomeAt's own thresholds (the old landForestAt/landBarrensAt,
+      // which only ever covered 2 of these 9 categories and could drift
+      // out of sync with biomeAt by hand-edit). `plains` stays the flat,
+      // unwashed base land color underneath all of these, matching before.
+      // Cheap presence pre-check (a plain pass over the already-in-memory
+      // cellData array) skips the marching-squares extraction entirely for
+      // any biome absent from this particular map, rather than paying a
+      // full cols*rows scan on every one of the 9 categories regardless of
+      // whether it actually appears here.
+      const presentBiomes = new Set(cellData.map((c) => c.biome));
+      for (const b of OW_LOWLAND_WASH_BIOMES) {
+        if (!presentBiomes.has(b)) continue;
+        const biomeMaskAt = (i) => (cellData[i].biome === b ? 1 : 0);
+        const loops = extractFillableRegions(cols, rows, cellW, cellH, biomeMaskAt, 0.5, canvas.width, canvas.height, minLoopArea);
+        if (loops.length === 0) continue;
         ctx.save();
         clipToLoops(landLoops.length ? landLoops : beachLoops);
-        for (const group of groupChainsIntoLoops(forestLoops)) {
-          paintWatercolorWash(ctx, group, washRng, palette.wash.forest, palette.ink, 28);
-        }
-        ctx.restore();
-      }
-
-      // Barrens wash: symmetric to the forest wash above, just on the
-      // opposite (low-moisture) side of biomeAt's aridT threshold -- passing
-      // `1 - m` and thresholding on `1 - aridT` reuses extractFillableRegions'
-      // superlevel-set extraction without needing a second sub-level-set
-      // code path. Needed because the base land fill is a single flat
-      // plains color regardless of moisture (see landLoops fill above) --
-      // without an overlay wash, barrens cells would be invisible under it,
-      // same reason forest needs this same treatment.
-      const landBarrensAt = (i) => (heights[i] >= seaLevel + 0.03 ? 1 - cellData[i].m : -1);
-      const barrensLoops = extractFillableRegions(cols, rows, cellW, cellH, landBarrensAt, 1 - aridT, canvas.width, canvas.height, minLoopArea);
-      if (barrensLoops.length > 0) {
-        ctx.save();
-        clipToLoops(landLoops.length ? landLoops : beachLoops);
-        for (const group of groupChainsIntoLoops(barrensLoops)) {
-          paintWatercolorWash(ctx, group, washRng, palette.wash.barrens, palette.ink, 28);
+        for (const group of groupChainsIntoLoops(loops)) {
+          paintWatercolorWash(ctx, group, washRng, palette.wash[b], palette.ink, 28);
         }
         ctx.restore();
       }
@@ -1880,8 +2191,8 @@ function renderOverworldMap(container) {
           const biome = biomeAtPoint(px, py);
           if (biome === 'hills' || biome === 'mountains') {
             paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, biome === 'mountains');
-          } else if (biome === 'forest' || biome === 'barrens') {
-            paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes.forest);
+          } else if (OW_LOWLAND_WASH_BIOMES.includes(biome)) {
+            paintBiomeTexture(ctx, biome, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes);
           }
         }
       }
@@ -2200,13 +2511,20 @@ function renderOverworldMap(container) {
     // statistics (biome mix, settlement tiers, river count, island-ness),
     // not anything the map's rendering needs -- computed last, purely from
     // data already on hand.
+    // Pre-seeded with the original 6 keys lib/campaign-themes.js's
+    // suggestCampaignTheme reads directly (s.biome.mountains, .forest,
+    // etc.) so those lookups stay defined (0, not undefined -> NaN) even on
+    // a map with zero cells of that biome; every OTHER biome (including the
+    // new climate categories) still accumulates correctly via the `|| 0`
+    // fallback below, just without suggestCampaignTheme's heuristic
+    // currently reading them.
     const landBiomeCounts = { plains: 0, forest: 0, hills: 0, mountains: 0, snow: 0, barrens: 0 };
     let beachCount = 0, landCount = 0;
     for (const { biome } of cellData) {
       if (biome === 'deepwater' || biome === 'shallowwater') continue;
       landCount++;
       if (biome === 'beach') { beachCount++; continue; }
-      if (landBiomeCounts[biome] !== undefined) landBiomeCounts[biome]++;
+      landBiomeCounts[biome] = (landBiomeCounts[biome] || 0) + 1;
     }
     const landNonBeachCount = Math.max(1, landCount - beachCount);
     const biomeFraction = {};

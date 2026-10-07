@@ -35,9 +35,16 @@
 //  5. The main wall is now a faceted polygon (fewer, longer straight
 //     segments) with small towers at intervals instead of a smooth curve --
 //     reads as a fortification, not a rounded blob.
-function deriveSettlementSeed(overworldSeed, idx) {
+// `variant` re-rolls the whole layout without touching the campaign's own
+// seed. The service uses it when a render violates a hard rule: the map the
+// player's URL points at must stay the same map, so the retry has to change
+// the internal streams and nothing else. variant 0 is the identity case and
+// hashes exactly as it did before this existed, so no already-generated
+// settlement shifts.
+function deriveSettlementSeed(overworldSeed, idx, variant) {
   const mixSeed = (overworldSeed ^ Math.imul(idx + 1, 0x9e3779b1)) >>> 0;
-  const mixRng = mulberry32(mixSeed);
+  const withVariant = variant ? (mixSeed ^ Math.imul(variant, 0x85ebca6b)) >>> 0 : mixSeed;
+  const mixRng = mulberry32(withVariant);
   return Math.floor(mixRng() * 0xffffffff) >>> 0;
 }
 
@@ -52,10 +59,28 @@ function deriveSettlementSeed(overworldSeed, idx) {
 // has enough land to hold that tier at all.
 const SETTLEMENT_CANVAS_SIZE = 700;
 
+// cellCount is the plot mesh, and it caps how many buildings a settlement can
+// ever have. These were tuned back when a building could be drawn far larger
+// than its own cell, so a coarse mesh still filled the map; now that
+// fitRectToPolygon confines each building to its cell, a coarse mesh just
+// yields a handful of oversized houses. A headless audit measured 15
+// buildings in a town and 35 in a city -- against real reference maps where
+// even a village shows ~20. Raised so the mesh is no longer the constraint;
+// render cost is no longer a reason to keep it low now that generation runs
+// server-side and is cached.
 const SETTLEMENT_TIER_CONFIG = {
-  village: { cellCount: 55, radius: 160, spokes: 4, rings: 1, wall: false, gates: 0 },
-  town: { cellCount: 120, radius: 200, spokes: 6, rings: 2, wall: true, gates: 2 },
-  city: { cellCount: 210, radius: 260, spokes: 8, rings: 3, wall: true, gates: 3 },
+  // minBuildings is the floor the street-frontage filter must not push the
+  // town below (the low end of RULES.md C2's per-tier band) -- see the
+  // frontage/backland split in the building loop.
+  // Village cell count raised again after the lobed outline landed: a 200-seed
+  // audit found five villages holding only 5 buildings against a 6-20 band.
+  // The cause is not the minimum-building fallback but the pool it draws from
+  // -- on a tight village site, street clearance and the narrower lobes
+  // between roads left fewer eligible cells in total than the floor asked
+  // for, so there was nothing left to admit.
+  village: { cellCount: 180, radius: 160, spokes: 4, rings: 1, wall: false, gates: 0, minBuildings: 8 },
+  town: { cellCount: 320, radius: 200, spokes: 6, rings: 2, wall: true, gates: 2, minBuildings: 28 },
+  city: { cellCount: 560, radius: 260, spokes: 8, rings: 3, wall: true, gates: 3, minBuildings: 65 },
 };
 
 // Building-tier variety (footprint size band + relative weight), addressing
@@ -137,24 +162,61 @@ function projectPolyAtAngle(poly, angle) {
   return { area: w * h, w, h, angle, cx: ccx * cosB - ccy * sinB, cy: ccx * sinB + ccy * cosB };
 }
 
-// A polygon's bounding rectangle at an arbitrary angle can be considerably
-// bigger than the cell itself -- e.g. a skewed/elongated Voronoi cell
-// projected at a road-facing angle far from its own natural axis -- with
-// corners reaching into neighboring cells' own territory. That was the
-// direct cause of buildings/POIs visually overlapping their neighbors:
-// the fix isn't a flat shrink (that just makes every building smaller),
-// it's scaling DOWN specifically the rectangles that are a poor fit for
-// their actual cell, leaving well-fitting ones (most of them) untouched.
-// `targetRatio` is roughly a hexagon's own area-to-bounding-box ratio --
-// cells at or above that ratio are left alone.
-function fitRectToPolygon(rect, polygonArea) {
-  const rectArea = rect.w * rect.h;
-  if (rectArea <= 0) return rect;
-  const targetRatio = 0.85;
-  const ratio = polygonArea / rectArea;
-  if (ratio >= targetRatio) return rect;
-  const scale = Math.sqrt(ratio / targetRatio);
-  return { ...rect, w: rect.w * scale, h: rect.h * scale };
+// Named pointInPolygonXY, not pointInPolygon -- lib/terrain-grid.js already
+// defines a global pointInPolygon(pt, poly) taking a point OBJECT, used by
+// groupChainsIntoLoops. Every generator script shares one global namespace
+// (plain <script> tags, no modules), and this file loads after terrain-
+// grid.js, so a same-named function here silently overwrote that earlier
+// one for every caller anywhere in the app, not just this file -- confirmed
+// live: groupChainsIntoLoops crashed on `poly.length` of undefined, because
+// its call passed (point, polygon) into what had quietly become THIS
+// function's (x, y, polygon) signature. Not a headless-only bug -- this
+// would break in the browser too, on any page load where terrain-grid's
+// pointInPolygon is called after map-settlement.js has loaded, which is
+// every page load in this single-page app. A distinct name is the fix, not
+// a shared signature -- the two callers want different argument shapes for
+// good reason (this one already has x/y unpacked from rectCornersAtScale).
+function pointInPolygonXY(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi + 1e-12) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function rectCornersAtScale(rect, scale) {
+  const w = rect.w * scale, h = rect.h * scale;
+  const cos = Math.cos(rect.angle), sin = Math.sin(rect.angle);
+  return [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]
+    .map(([lx, ly]) => ({ x: rect.cx + lx * cos - ly * sin, y: rect.cy + lx * sin + ly * cos }));
+}
+
+// Shrinks a building's rectangle until it lies wholly inside its OWN Voronoi
+// cell. That containment is what actually guarantees buildings don't overlap:
+// Voronoi cells tile the plane without overlapping, so two rects each
+// contained in their own cell cannot intersect, whatever angle they were
+// projected at.
+//
+// The previous version compared the rect's AREA against the cell's and
+// scaled by the ratio, which is not the same thing and does not guarantee
+// anything -- a headless audit over 12 seeds found plot overlaps on 8 of
+// them, up to 14 collisions on a single city, because an area-ratio test
+// says nothing about where the corners actually land. It got worse once
+// rects started being projected at a road-facing angle rather than their own
+// area-minimising one, since that angle can push corners much further into a
+// neighbour. Binary search on the scale is exact, cheap (12 iterations of
+// four point-in-polygon tests) and needs no tuning constant.
+function fitRectToPolygon(rect, polygon) {
+  if (!polygon || polygon.length < 3 || rect.w <= 0 || rect.h <= 0) return rect;
+  const fits = (scale) => rectCornersAtScale(rect, scale).every((c) => pointInPolygonXY(c.x, c.y, polygon));
+  if (fits(1)) return rect;
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 12; i++) {
+    const mid = (lo + hi) / 2;
+    if (fits(mid)) lo = mid; else hi = mid;
+  }
+  return { ...rect, w: rect.w * lo, h: rect.h * lo };
 }
 
 // Draws a building/POI footprint as its oriented rectangle, shrunk for a
@@ -223,32 +285,69 @@ function pointInOrientedRect(px, py, rect, halfW, halfH) {
 // placed lane, so the network branches organically rather than every lane
 // radiating from the same few anchor points) and rejects any anchor that
 // would fall inside the castle compound.
-function buildLaneNetwork(rng, anchors, count, insideCastleFn) {
+// Each lane connects one anchor to a nearby OTHER anchor with a gently
+// wobbled path, rather than random-walking off from a single anchor in an
+// arbitrary direction for a few segments.
+//
+// A random walk has no relationship to anything else on the map: it starts
+// somewhere and wanders off in a direction picked independently of every
+// other street, so it crosses spokes, rings, branches and other lanes
+// wherever it happens to land -- confirmed directly as the cause of a
+// "roads overlapping with no general reason" complaint, visible as a tangle
+// of lines crossing at arbitrary angles with no junction. A path that
+// actually runs FROM one real point TO another nearby one reads as an alley
+// connecting two things (which is what a lane is), and is bounded by the
+// distance between its two endpoints rather than open-ended, so it can't
+// wander arbitrarily far off from where it started either.
+// `laneChance` is a PROBABILITY per anchor, not a total lane count. A fixed
+// count was tried first and made coverage worse the moment an interior
+// scatter of anchors was added to fix a DIFFERENT gap (see the caller): with
+// a fixed total budget, more anchors in the pool just meant each existing
+// connection was drawn from a larger, more diluted set, so lanes drifted
+// toward connecting scattered interior points to each other and away from
+// the areas that actually needed a nearby street. A per-anchor probability
+// scales naturally instead -- doubling the anchor density roughly doubles
+// the number of lanes drawn, so adding anchors to cover a previously-bare
+// area actually covers it, rather than spreading a constant budget thinner.
+function buildLaneNetwork(rng, anchors, laneChance, insideCastleFn) {
   const lanes = [];
-  const pool = anchors.slice();
-  for (let i = 0; i < count && pool.length; i++) {
-    let start = null;
-    for (let tries = 0; tries < 5 && !start; tries++) {
-      const candidate = pool[Math.floor(rng() * pool.length)];
-      if (!insideCastleFn(candidate.x, candidate.y)) start = candidate;
+  if (anchors.length < 2) return lanes;
+  // Visited once each, in a shuffled order (not `count` random draws WITH
+  // replacement from the pool) -- so density depends only on anchor spacing
+  // and laneChance, never on how many anchors happen to exist.
+  const order = anchors.map((_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+  }
+  for (const idx of order) {
+    if (rng() > laneChance) continue;
+    const a = anchors[idx];
+    if (insideCastleFn(a.x, a.y)) continue;
+    // The few nearest OTHER anchors, not always the single nearest -- an
+    // occasional longer connection reads as irregular rather than every
+    // lane being exactly the same short length.
+    const near = anchors
+      .filter((p) => p !== a)
+      .map((p) => ({ p, d: Math.hypot(p.x - a.x, p.y - a.y) }))
+      .sort((x, y) => x.d - y.d)
+      .slice(0, 5);
+    if (!near.length) continue;
+    const b = near[Math.floor(rng() * near.length)].p;
+    if (insideCastleFn(b.x, b.y)) continue;
+
+    const segCount = 2 + Math.floor(rng() * 2);
+    const points = [{ x: a.x, y: a.y }];
+    const perp = Math.atan2(b.y - a.y, b.x - a.x) + Math.PI / 2;
+    for (let s = 1; s <= segCount; s++) {
+      const t = s / segCount;
+      const px = a.x + (b.x - a.x) * t, py = a.y + (b.y - a.y) * t;
+      // Pinned exactly at 0 on the last point, so the lane actually arrives
+      // at its destination anchor instead of wobbling past it.
+      const wobble = s === segCount ? 0 : (rng() - 0.5) * 2 * 12;
+      points.push({ x: px + Math.cos(perp) * wobble, y: py + Math.sin(perp) * wobble });
     }
-    if (!start) continue;
-    let angle = rng() * Math.PI * 2;
-    let x = start.x, y = start.y;
-    const segCount = 2 + Math.floor(rng() * 3);
-    const points = [{ x, y }];
-    for (let s = 0; s < segCount; s++) {
-      angle += (rng() - 0.5) * 1.1;
-      const len = 12 + rng() * 22;
-      x += Math.cos(angle) * len;
-      y += Math.sin(angle) * len;
-      if (insideCastleFn(x, y)) break;
-      points.push({ x, y });
-    }
-    if (points.length > 1) {
-      lanes.push(points);
-      if (rng() < 0.55) pool.push(points[points.length - 1]);
-    }
+    lanes.push(points);
   }
   return lanes;
 }
@@ -274,13 +373,38 @@ function distToPolylines(x, y, polylines, withAngle) {
   return withAngle ? { dist: best, angle: bestAngle } : best;
 }
 
+const COMPASS_DIRS = ['East', 'Southeast', 'South', 'Southwest', 'West', 'Northwest', 'North', 'Northeast'];
+
+// Compass bearing of (dx, dy) from the town centre, in canvas coordinates
+// where +y points down -- so North is negative dy. Used to tell apart two
+// instances of the same POI type (the city's two gate guard posts).
+//
+// `taken` makes the result unique rather than merely likely to be: two gates
+// can fall in the same octant, which would put the identical name on the map
+// twice all over again. On a clash it steps out to the neighbouring octants,
+// nearest first, so the name stays a truthful description of roughly where
+// the building is.
+function compassOf(dx, dy, taken) {
+  const deg = (Math.atan2(dy, dx) * 180) / Math.PI;      // 0 = East, +90 = South
+  const base = (Math.round(deg / 45) + 8) % 8;
+  if (!taken) return COMPASS_DIRS[base];
+  for (const step of [0, 1, -1, 2, -2, 3, -3, 4]) {
+    const dir = COMPASS_DIRS[(base + step + 8) % 8];
+    if (!taken.has(dir)) return dir;
+  }
+  return COMPASS_DIRS[base];
+}
+
 function renderSettlementMap(container, params) {
   const overworldSeed = parseInt(params.get('seed'), 10) || 1;
   const idx = parseInt(params.get('idx'), 10) || 0;
   const name = params.get('name') || 'Unnamed settlement';
   const tierKey = SETTLEMENT_TIER_CONFIG[params.get('tier')] ? params.get('tier') : 'village';
   const config = SETTLEMENT_TIER_CONFIG[tierKey];
-  const seed = deriveSettlementSeed(overworldSeed, idx);
+  // Set only by the render service's rule-violation retry, never by a user
+  // link -- absent, this is 0 and the layout is the canonical one.
+  const variant = parseInt(params.get('variant'), 10) || 0;
+  const seed = deriveSettlementSeed(overworldSeed, idx, variant);
 
   // Terrain-backdrop params, same parsing helpers views/map-detail.js and
   // views/map-landmark.js already use (parseGuideParam/clampParam) --
@@ -302,6 +426,8 @@ function renderSettlementMap(container, params) {
     <div class="map-layout">
       <div class="map-controls">
         <label>Theme <select id="st-theme"></select></label>
+        <label><input type="checkbox" id="st-server"> Render on server (rules-checked, cached)</label>
+        <p id="st-server-status" class="status-text"></p>
         <p class="status-text">Derived from overworld seed ${overworldSeed}, settlement #${idx + 1} -- this layout is fixed to that settlement and can't be reseeded independently.</p>
         <hr>
         <button id="st-export">Export PNG</button>
@@ -352,6 +478,7 @@ function renderSettlementMap(container, params) {
     const laneRng = mulberry32(seed + 404040);
     const castleRng = mulberry32(seed + 909090);
     const roadRng = mulberry32(seed + 202020);
+    const countryRng = mulberry32(seed + 313131);
 
     let cx = canvas.width / 2, cy = canvas.height / 2;
     const R = config.radius;
@@ -473,9 +600,89 @@ function renderSettlementMap(container, params) {
     // line width ~2.9 = ~325px, vs. 350px half-canvas-extent -- 25px margin
     // before the clamp even engages.
     const wobble = makeRadialWobbleSampler(boundaryRng, 5);
-    const WOBBLE_AMP = 0.18;
+    const WOBBLE_AMP = 0.10;
+
+    // The town's outline is a consequence of its roads, not a wobbled circle.
+    //
+    // This used to be R * (1 + 0.18 * wobble) -- an 18% ripple on a disc,
+    // with smooth low harmonics. A contact sheet of 24 settlements made the
+    // result plain: every one of them, village through city, was the same
+    // round blob, which is the single strongest "generated" tell on the map.
+    // Real settlements grow OUT ALONG their approach roads and stay thin
+    // between them (ribbon development), so the silhouette is lobed, and the
+    // lobes line up with the streets because the streets are why they exist.
+    //
+    // So the growth axes are generated first and the roads are then run down
+    // them, rather than a circle being drawn and spokes laid over it. This is
+    // also expected to do most of the work for RULES.md B4: buildings sit in
+    // the lobes because that is where the town is, and the lobes are exactly
+    // where the roads are.
+    // Road bearings are spaced by random gaps rather than evenly around the
+    // circle. Evenly-spaced axes plus symmetric lobes produced a tidy flower:
+    // the first version of this replaced "every town is a disc" with "every
+    // town is a four-petal clover", which is the same fault wearing a
+    // different shape. Real bearings bunch and leave wide empty quadrants.
+    const rawGaps = [];
+    let gapTotal = 0;
+    for (let i = 0; i < config.spokes; i++) {
+      const g = 0.4 + boundaryRng() * 1.6;
+      rawGaps.push(g);
+      gapTotal += g;
+    }
+    const growthAxes = [];
+    let acc = boundaryRng() * Math.PI * 2;
+    for (let i = 0; i < config.spokes; i++) {
+      acc += (rawGaps[i] / gapTotal) * Math.PI * 2;
+      growthAxes.push({
+        angle: acc,
+        // Roads are not equals: a couple are the trade route the town lives
+        // on and reach far, the rest are lanes that peter out. Without this
+        // spread the lobes come out even and it reads as a cog, not a town.
+        strength: 0.30 + boundaryRng() * 0.80,
+        // Asymmetric: the built-up band along a road is wider on one side
+        // than the other, which is what stops each lobe reading as a petal.
+        sigmaL: 0.26 + boundaryRng() * 0.34,
+        sigmaR: 0.26 + boundaryRng() * 0.34,
+      });
+    }
+
+    // A whole-town lean. Settlements are rarely symmetric about their market:
+    // they sit downhill, downriver, or on the landward side of a harbour, and
+    // this one low-frequency term does more to kill the "grown in a dish"
+    // look than any amount of edge noise.
+    const driftAngle = boundaryRng() * Math.PI * 2;
+    const driftAmp = 0.10 + boundaryRng() * 0.14;
+
+    const LOBE_FLOOR = 0.62;   // how far the town reaches between its roads
+    function lobeFactor(theta) {
+      let f = LOBE_FLOOR;
+      for (const ax of growthAxes) {
+        let d = (theta - ax.angle) % (Math.PI * 2);
+        if (d > Math.PI) d -= Math.PI * 2;
+        if (d < -Math.PI) d += Math.PI * 2;
+        const s = d >= 0 ? ax.sigmaR : ax.sigmaL;
+        f = Math.max(f, LOBE_FLOOR + ax.strength * Math.exp(-(d * d) / (2 * s * s)));
+      }
+      return f * (1 + driftAmp * Math.cos(theta - driftAngle));
+    }
+
+    // Area normalisation, and the reason this change can't repeat the
+    // starve-then-overcorrect cycle this generator has already been through
+    // twice. A lobed outline encloses less than the disc it replaces, which
+    // would quietly cut the buildable cell count and push building counts
+    // back under their C2 bands. Scaling by the RMS of the lobe factor holds
+    // the enclosed area to exactly what the old circle had, so tier density
+    // is unchanged by construction rather than by retuning afterwards.
+    let lobeSumSq = 0;
+    const LOBE_SAMPLES = 256;
+    for (let i = 0; i < LOBE_SAMPLES; i++) {
+      const f = lobeFactor((i / LOBE_SAMPLES) * Math.PI * 2);
+      lobeSumSq += f * f;
+    }
+    const lobeNorm = 1 / Math.sqrt(lobeSumSq / LOBE_SAMPLES);
+
     function effectiveR(theta) {
-      const base = R * (1 + WOBBLE_AMP * wobble(theta));
+      const base = R * lobeFactor(theta) * lobeNorm * (1 + WOBBLE_AMP * wobble(theta));
       return Math.min(base, shoreLimitAt(theta), canvas.width / 2 * 0.97);
     }
     // The wall is drawn as a coarse, faceted polygon (WALL_SEGMENTS below,
@@ -511,13 +718,14 @@ function renderSettlementMap(container, params) {
     // are jittered heavily (0.45 of half-spacing) and vary in drawn length
     // rather than all reaching the wall; rings are gapped arcs, not full
     // circles; branch stubs add organic texture off the main network.
-    const spokeJitter = (Math.PI / config.spokes) * 0.45;
-    const spokeAngles = [];
-    const spokeLengthFrac = [];
-    for (let i = 0; i < config.spokes; i++) {
-      spokeAngles.push((i / config.spokes) * Math.PI * 2 + (streetRng() - 0.5) * 2 * spokeJitter);
-      spokeLengthFrac.push(0.55 + streetRng() * 0.45);
-    }
+    // Spokes ARE the growth axes that shaped the outline above -- the road
+    // came first and the town spread along it. Generating the two
+    // independently (as before) is what put streets at angles unrelated to
+    // the town's own shape.
+    const spokeAngles = growthAxes.map((ax) => ax.angle);
+    // A strong axis reached further, so its road runs the full length of the
+    // lobe it created; weak ones stop short of the edge.
+    const spokeLengthFrac = growthAxes.map((ax) => Math.min(1, 0.62 + ax.strength * 0.42));
     const ringRadii = [];
     const ringWobblers = [];
     for (let i = 1; i <= config.rings; i++) {
@@ -543,6 +751,28 @@ function renderSettlementMap(container, params) {
       });
     }
 
+    // Kept off the market hub's own doorstep. Every spoke converges there
+    // and every ring is tightest there, so that small area is already where
+    // the primary street pattern is at its densest -- branches and lanes
+    // anchored that close, then flung off in a random direction, piled MORE
+    // uncoordinated line-work directly on top of it. RULES.md's building
+    // clearance rejects a cell within reach of ANY of the four street
+    // layers, and near the hub a cell is within reach of several of them at
+    // once, so nothing could ever clear all four: a render crop showed a
+    // wide ring of open, textured ground immediately around the plaza with
+    // not one building on it, tangled with roads crossing each other with
+    // no junction. Keeping secondary infill off this band fixes both at
+    // once -- less overlapping line-work, and the primary spokes/rings
+    // already passing through are enough on their own to make that band
+    // buildable again.
+    // A village has only 4 spokes and 1 ring, so its branches and lanes are
+    // doing far more of the "give a building something to front" work than
+    // a city's -- which has 8 spokes and 3 rings of primary street to spare.
+    // The same absolute exclusion radius that suits a dense city core costs
+    // a village proportionally much more of its already-thin network, which
+    // measured out as village street frontage falling well below its
+    // pre-fix baseline. Smaller for smaller tiers instead.
+    const hubClutterR = Math.max(plazaR * 2.5, R * (tierKey === 'village' ? 0.09 : 0.14));
     const branchCount = Math.max(3, Math.floor(config.spokes * 1.2));
     const branchSegments = [];
     for (let b = 0; b < branchCount; b++) {
@@ -560,6 +790,7 @@ function renderSettlementMap(container, params) {
         const r = ringRadiusAt(ri, angle);
         ax = hubX + Math.cos(angle) * r; ay = hubY + Math.sin(angle) * r;
       } else continue;
+      if (Math.hypot(ax - hubX, ay - hubY) < hubClutterR) continue;
       const branchAngle = streetRng() * Math.PI * 2;
       const branchLen = R * (0.08 + streetRng() * 0.14);
       branchSegments.push({ x1: ax, y1: ay, x2: ax + Math.cos(branchAngle) * branchLen, y2: ay + Math.sin(branchAngle) * branchLen });
@@ -646,8 +877,70 @@ function renderSettlementMap(container, params) {
         laneAnchors.push({ x: hubX + Math.cos(angle) * r, y: hubY + Math.sin(angle) * r });
       }
     }
-    const laneCount = Math.max(6, Math.round(config.cellCount / 9));
-    const laneNetwork = buildLaneNetwork(laneRng, laneAnchors, laneCount, insideCastle);
+    // Back lanes out in the flanks of each lobe.
+    //
+    // Every anchor above sits ON an existing street, so the lanes drawn
+    // between them only ever thread the gaps near the middle of the town.
+    // The buildings that fail RULES.md B4 are not there -- they are out on
+    // the shoulders of each growth lobe, which had no street of any kind
+    // within reach. That is the measurable half of the "same spiderweb every
+    // time" complaint: one high street per lobe and nothing behind it.
+    //
+    // Anchoring laterally off each spoke gives the lanes somewhere to go, and
+    // matches how ribbon development actually works -- a road, the frontages
+    // along it, and back lanes serving the plots behind them.
+    for (let si = 0; si < spokeAngles.length; si++) {
+      const angle = spokeAngles[si];
+      const perp = angle + Math.PI / 2;
+      for (const t of [0.3, 0.55, 0.8]) {
+        const r = effectiveR(angle) * spokeLengthFrac[si] * t;
+        for (const side of [-1, 1]) {
+          const off = r * (0.28 + laneRng() * 0.30) * side;
+          const px = hubX + Math.cos(angle) * r + Math.cos(perp) * off;
+          const py = hubY + Math.sin(angle) * r + Math.sin(perp) * off;
+          // Only if it actually lands inside the town -- the lobes are
+          // narrow between the roads, so a lateral offset can easily fall
+          // outside the boundary and would drag a lane out over open ground.
+          const pr = Math.hypot(px - cx, py - cy);
+          if (pr < effectiveR(Math.atan2(py - cy, px - cx)) * 0.88) {
+            laneAnchors.push({ x: px, y: py });
+          }
+        }
+      }
+    }
+
+    // A scatter of anchors across the open interior, not just points sitting
+    // ON an existing street. buildLaneNetwork now connects each anchor to a
+    // nearby OTHER anchor rather than random-walking off in an arbitrary
+    // direction (see its own header comment) -- which fixed the senseless
+    // overlapping crossings, but left every lane joining two points that
+    // were already close to a primary street. The interior of an open block,
+    // with no anchor of its own, got no lane reaching into it at all: a
+    // 24-seed audit measured street frontage falling from 67% to 42% the
+    // moment the random walk (which could wander into such a gap by
+    // accident) was replaced. These scattered points give the connector
+    // something to reach into, so lane coverage spreads across the town's
+    // open ground instead of clustering only near infrastructure that
+    // already has it.
+    const interiorScatter = Math.round(config.cellCount * (tierKey === 'village' ? 0.34 : 0.26));
+    for (let i = 0; i < interiorScatter; i++) {
+      const angle = laneRng() * Math.PI * 2;
+      const r = hubClutterR + laneRng() * (R - hubClutterR) * 0.95;
+      const px = hubX + Math.cos(angle) * r, py = hubY + Math.sin(angle) * r;
+      const pr = Math.hypot(px - cx, py - cy);
+      if (pr < effectiveR(Math.atan2(py - cy, px - cx)) * 0.88) {
+        laneAnchors.push({ x: px, y: py });
+      }
+    }
+
+    // See hubClutterR above -- lanes rooted this close to the hub only
+    // added to the tangle sitting on top of the primary spoke/ring pattern
+    // that already converges there.
+    const laneAnchorsClear = laneAnchors.filter((p) => Math.hypot(p.x - hubX, p.y - hubY) >= hubClutterR);
+    // A probability, not a count -- see buildLaneNetwork's own header. Tuned
+    // so a typical anchor has roughly even odds of getting a lane; density
+    // then comes from how many anchors there are; not from this number.
+    const laneNetwork = buildLaneNetwork(laneRng, laneAnchorsClear, tierKey === 'village' ? 0.8 : 0.7, insideCastle);
     function distToLanes(x, y, withAngle) { return distToPolylines(x, y, laneNetwork, withAngle); }
 
     // `withAngle` returns the spoke's own direction (spokes run dead
@@ -697,6 +990,11 @@ function renderSettlementMap(container, params) {
       const r = effectiveR(angle);
       townBoundaryLoop.push({ x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r });
     }
+    // The town's own outline, reported so rules can reason about what is
+    // inside the settlement versus out in the countryside (RULES.md C1/C3).
+    if (typeof isTracing === 'function' && isTracing()) {
+      traceShape('boundary', { loop: townBoundaryLoop.map((p) => ({ x: p.x, y: p.y })) });
+    }
     function pathFromBoundary() {
       ctx.beginPath();
       ctx.moveTo(townBoundaryLoop[0].x, townBoundaryLoop[0].y);
@@ -733,6 +1031,232 @@ function renderSettlementMap(container, params) {
     } else {
       ctx.fillStyle = palette.ground;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // No real backdrop terrain to hachure onto here -- renderTerrainPatch
+      // (the branch above) already textures its own patch via
+      // paintHachureField, per its own header comment: "EVERY square inch of
+      // ground on a real WotC map carries dense ink dashes... not a flat
+      // biome color with a light noise grain." This fallback path skipped
+      // that entirely, leaving the countryside with nothing but this flat
+      // fill and whatever paintParchmentGrain adds later. Zoomed in, that
+      // grain -- tuned as a subtle FINISHING layer over busier art beneath
+      // it -- was the only mark on the page out here, and with nothing to
+      // blend into it read exactly like the "mold on the water" look its own
+      // comment describes fixing, just by a different route. A light hachure
+      // pass gives this fallback the same base ground treatment the guided
+      // path already has, at lower density than the town's own so the
+      // built-up interior still reads busier than open countryside.
+      //
+      // This is not a cosmetic-only fix: every settlement rendered through
+      // the mapgen service takes this exact branch today, since nothing yet
+      // reconstructs a real sampleGuide server-side (see RULES.md and the
+      // Stage 4 overworld work) -- so this is what actually ships, not a
+      // testing-only fallback.
+      // heightAt needs a DOMINANT smooth direction, not pure noise. Hachure
+      // strokes are drawn perpendicular to the local gradient, so a height
+      // field built from unmodified multi-octave FBM -- which by
+      // construction has many separate local peaks and troughs -- draws a
+      // separate closed contour loop around every one of them: the first
+      // version of this covered the whole countryside in distinct swirling
+      // whirlpools, each centered on wherever the noise happened to peak.
+      // The in-town hachure call just below avoids this by using a strong
+      // RADIAL term (distance from the single market hub) that dominates its
+      // own small noise wobble almost everywhere on the canvas, so it has
+      // exactly one center. Countryside has no such landmark to radiate from,
+      // so a fixed linear "wind direction" (one random angle per seed) plays
+      // the same dominating role here: strokes run roughly perpendicular to
+      // one consistent direction, with the noise only wobbling that gently,
+      // rather than carving its own many-centered field.
+      const fallbackGroundRng = mulberry32(seed + 484848);
+      const fallbackWarp = makeFbmSampler(fallbackGroundRng, 3);
+      const windAngle = fallbackGroundRng() * Math.PI * 2;
+      const windX = Math.cos(windAngle), windY = Math.sin(windAngle);
+      paintHachureField(ctx, canvas.width, canvas.height, fallbackGroundRng, palette.ink,
+        (x, y) => x * windX + y * windY + fallbackWarp((x / canvas.width) * 2, (y / canvas.height) * 2) * 40,
+        null, { spacing: 7, strokeLen: 5, density: 0.5, passes: 1, patchFloor: 0.5 });
+    }
+
+    // The countryside the town sits in (RULES.md C3).
+    //
+    // A settlement drawn on bare paper reads as a diagram, not a map. Every
+    // reference idiom puts the town in a landscape: roads carrying on out of
+    // frame, worked fields against the edge of the built-up area, woodland in
+    // the ground between them. Without them a contact sheet of these maps
+    // showed each settlement floating in blank parchment, and only 9-13% of
+    // the surrounding canvas carried any detail at all on village seeds.
+    //
+    // Drawn here, immediately after the backdrop and before the town's own
+    // ground tone, so anything that strays inside the boundary is painted
+    // over rather than needing to be clipped out.
+    drawCountryside();
+
+    function outsideTown(x, y, margin) {
+      const r = Math.hypot(x - cx, y - cy);
+      return r > effectiveR(Math.atan2(y - cy, x - cx)) * (margin || 1.0);
+    }
+    // Never put fields or woodland out on open water. With a real backdrop
+    // this asks the terrain directly; without one there is no water to avoid.
+    function isLand(x, y) {
+      if (!sampleGuide) return true;
+      return sampleGuide(x / canvas.width, y / canvas.height) >= sea + 0.02;
+    }
+
+    function drawCountryside() {
+      const W = canvas.width, H = canvas.height;
+
+      // Roads out. The strongest growth axes are the routes the town grew
+      // along, so they are the ones that carry on to the next place -- which
+      // also means the outbound roads line up with the streets inside the
+      // gates instead of arriving at unrelated angles.
+      const outbound = growthAxes
+        .map((ax, i) => ({ ax, i }))
+        .sort((a, b) => b.ax.strength - a.ax.strength)
+        .slice(0, Math.max(2, Math.round(growthAxes.length * 0.6)));
+
+      const roadTracks = [];
+      for (const { ax } of outbound) {
+        const pts = [];
+        const startR = effectiveR(ax.angle) * 0.98;
+        const maxR = Math.hypot(W, H);
+        let drift = 0;
+        for (let r = startR; r < maxR; r += 26) {
+          drift += (countryRng() - 0.5) * 0.10;   // a lane wanders
+          const a = ax.angle + drift;
+          const px = cx + Math.cos(a) * r, py = cy + Math.sin(a) * r;
+          if (!isLand(px, py)) break;             // stop at the shore
+          pts.push({ x: px, y: py });
+          if (px < -40 || px > W + 40 || py < -40 || py > H + 40) break;
+        }
+        if (pts.length >= 2) {
+          roadTracks.push(pts);
+          strokeOrganicRoad(ctx, pts, {
+            color: palette.road || palette.plaza,
+            edgeColor: palette.ink,
+            width: 3.4,
+            rng: countryRng,
+            surface: 'dirt',
+            traceKind: 'countryRoads',
+          });
+        }
+      }
+
+      // Worked fields, in bands hugging the edge of the town. Medieval strip
+      // fields ran in parallel blocks off the approach roads, which is why
+      // these are grouped and share an alignment rather than being scattered
+      // quads -- a field is only legible as farmland if it has neighbours
+      // lying the same way.
+      // Anchored to the roads that serve them, and laid out ALONG the road
+      // rather than pointing away from the town. The first version picked a
+      // bearing from the town centre and ran the strips outward from it,
+      // which put a ring of long rectangles radiating off the boundary --
+      // the same radial-symmetry tell the settlement outline had just been
+      // rebuilt to remove, and it read as green blades rather than farmland.
+      // Fields belong to their access track, so that is what they follow.
+      for (const track of roadTracks) {
+        const blocks = 2 + Math.floor(countryRng() * 3);
+        for (let b = 0; b < blocks; b++) {
+          // Somewhere along the first half of the road out, where the land
+          // in reach of the town actually gets worked.
+          const ti = 1 + Math.floor(countryRng() * Math.max(1, Math.floor(track.length * 0.55)));
+          const p = track[Math.min(ti, track.length - 1)];
+          const prev = track[Math.max(0, ti - 1)];
+          const roadAngle = Math.atan2(p.y - prev.y, p.x - prev.x);
+
+          const side = countryRng() < 0.5 ? 1 : -1;
+          const stripW = 11 + countryRng() * 8;
+          const stripL = 26 + countryRng() * 24;
+          const strips = 2 + Math.floor(countryRng() * 3);
+          // Set back from the verge by half a field's depth, so the block
+          // sits beside the lane instead of straddling it.
+          const setback = stripL * 0.6 + 6;
+          const bx = p.x + Math.cos(roadAngle + side * Math.PI / 2) * setback;
+          const by = p.y + Math.sin(roadAngle + side * Math.PI / 2) * setback;
+
+          for (let s = 0; s < strips; s++) {
+            const off = (s - (strips - 1) / 2) * stripW * 1.15;
+            const fx = bx + Math.cos(roadAngle) * off;
+            const fy = by + Math.sin(roadAngle) * off;
+            if (fx < 18 || fx > W - 18 || fy < 18 || fy > H - 18) continue;
+            if (!isLand(fx, fy) || !outsideTown(fx, fy, 1.02)) continue;
+            // Strips run perpendicular to the track they open off.
+            drawFieldStrip(fx, fy, stripW, stripL, roadAngle + Math.PI / 2);
+          }
+        }
+      }
+
+      // Woodland in the ground the fields and roads leave alone -- the gaps
+      // between the growth lobes, which is exactly where a real town has
+      // uncleared land.
+      const groves = 7 + Math.floor(countryRng() * 7);
+      for (let i = 0; i < groves; i++) {
+        const a = countryRng() * Math.PI * 2;
+        const r = effectiveR(a) * (1.14 + countryRng() * 0.55);
+        const px = cx + Math.cos(a) * r, py = cy + Math.sin(a) * r;
+        if (px < 16 || px > W - 16 || py < 16 || py > H - 16) continue;
+        if (!isLand(px, py) || !outsideTown(px, py, 1.06)) continue;
+        const stand = 2 + Math.floor(countryRng() * 4);
+        for (let t = 0; t < stand; t++) {
+          const ta = countryRng() * Math.PI * 2, td = countryRng() * 17;
+          drawTreeCluster(
+            ctx, px + Math.cos(ta) * td, py + Math.sin(ta) * td,
+            6 + countryRng() * 5, countryRng,
+            palette.canopy || palette.gardenFill || '#5d7a3a', palette.ink
+          );
+        }
+      }
+    }
+
+    // One field: a wobbled quad with furrow lines, boundary-hedged in ink.
+    // Deliberately drawn in the same wobbled-outline, ink-edged hand as the
+    // buildings and the town boundary, so the countryside doesn't read as a
+    // different drawing pasted around the town.
+    function drawFieldStrip(fx, fy, w, h, angle) {
+      const cos = Math.cos(angle), sin = Math.sin(angle);
+      const local = [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]];
+      const quad = local.map(([lx, ly]) => ({ x: fx + lx * cos - ly * sin, y: fy + lx * sin + ly * cos }));
+      const wobbled = jitterPolygon(quad, countryRng, Math.min(w, h) * 0.06, 2);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(wobbled[0].x, wobbled[0].y);
+      for (let i = 1; i < wobbled.length; i++) ctx.lineTo(wobbled[i].x, wobbled[i].y);
+      ctx.closePath();
+      ctx.fillStyle = palette.fieldFill || '#cdbb87';
+      ctx.globalAlpha = 0.5;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // Furrows, clipped to the field so they read as ploughing rather than
+      // as loose hatching lying across the countryside.
+      ctx.clip();
+      ctx.strokeStyle = palette.ink;
+      ctx.globalAlpha = 0.40;
+      ctx.lineWidth = 0.6;
+      const furrows = Math.max(3, Math.round(w / 3));
+      for (let i = 1; i < furrows; i++) {
+        const t = i / furrows - 0.5;
+        const ox = Math.cos(angle + Math.PI / 2) * t * w;
+        const oy = Math.sin(angle + Math.PI / 2) * t * w;
+        ctx.beginPath();
+        ctx.moveTo(fx + ox - cos * h * 0.46, fy + oy - sin * h * 0.46);
+        ctx.lineTo(fx + ox + cos * h * 0.46, fy + oy + sin * h * 0.46);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      ctx.strokeStyle = palette.ink;
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 0.9;
+      ctx.beginPath();
+      ctx.moveTo(wobbled[0].x, wobbled[0].y);
+      for (let i = 1; i < wobbled.length; i++) ctx.lineTo(wobbled[i].x, wobbled[i].y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+
+      if (typeof isTracing === 'function' && isTracing()) {
+        traceShape('fields', { cx: fx, cy: fy, w, h, angle, quad });
+      }
     }
 
     // The settlement's own ground tone, matched to the biome it actually
@@ -1032,6 +1556,17 @@ function renderSettlementMap(container, params) {
     // band `frac` used for both POI siting and building tier) is relative
     // to the market hub, matching how a real town's density/wealth actually
     // radiates from its market rather than from the walled area's centroid.
+    // Distance to the nearest street of any kind. The four networks are kept
+    // separate for clearance (a spoke must stay clearer than an alley), but
+    // for frontage any street will do -- a house on a lane fronts a street
+    // just as much as one on the high road.
+    function distToAnyStreet(x, y) {
+      return Math.min(
+        distToSpokes(x, y), distToRings(x, y),
+        distToBranches(x, y), distToLanes(x, y)
+      );
+    }
+
     function eligibleForPlot(cell) {
       const dx = cell.x - cx, dy = cell.y - cy;
       const distFromCenter = Math.hypot(dx, dy);
@@ -1067,11 +1602,19 @@ function renderSettlementMap(container, params) {
       // since they must stay clearly open; minor paths (branches/lanes)
       // get a smaller fraction since alleys are meant to weave more
       // tightly between buildings.
+      // Only a modest cell-size term is needed now. This margin used to be
+      // much larger because buildings could spill well outside their own
+      // cell and bury the street; fitRectToPolygon now guarantees a building
+      // stays inside its cell, so the clearance only has to account for a
+      // cell straddling the street rather than for unbounded overflow. The
+      // larger margin was starving towns of buildings (a headless audit
+      // measured 12 buildings in a town that should hold 25-70, and 27 in a
+      // city that should hold 60-160).
       const cellHalfSize = Math.sqrt(cellArea(cell)) * 0.5;
-      if (distToSpokes(cell.x, cell.y) < streetWidth / 2 + cellHalfSize * 0.4) return null;
-      if (distToRings(cell.x, cell.y) < streetWidth / 2 + cellHalfSize * 0.4) return null;
-      if (distToBranches(cell.x, cell.y) < streetWidth * 0.35 + cellHalfSize * 0.25) return null;
-      if (distToLanes(cell.x, cell.y) < streetWidth * 0.22 + cellHalfSize * 0.15) return null;
+      if (distToSpokes(cell.x, cell.y) < streetWidth / 2 + cellHalfSize * 0.15) return null;
+      if (distToRings(cell.x, cell.y) < streetWidth / 2 + cellHalfSize * 0.15) return null;
+      if (distToBranches(cell.x, cell.y) < streetWidth * 0.35 + cellHalfSize * 0.1) return null;
+      if (distToLanes(cell.x, cell.y) < streetWidth * 0.22 + cellHalfSize * 0.05) return null;
       // Composes with (doesn't replace) the sea-level rejection above --
       // a building can't sit in the river channel either, when this town
       // has one running through it.
@@ -1090,6 +1633,7 @@ function renderSettlementMap(container, params) {
     const poiPlan = settlementPoiPlan(tierKey, coastal);
     const claimedCellIdx = new Set();
     const poiPlaced = [];
+    const poiDirsUsed = new Map();   // poiKey -> Set of compass names already given out
     for (const poiKey of poiPlan) {
       const poiType = SETTLEMENT_POI_TYPES[poiKey];
       if (!poiType) continue;
@@ -1113,7 +1657,20 @@ function renderSettlementMap(container, params) {
       const poolSize = Math.max(1, Math.ceil(cells.length * 0.35));
       const chosen = cells[Math.floor(poiRng() * poolSize)];
       claimedCellIdx.add(chosen.index);
-      const displayLabel = poiKey === 'temple' ? TEMPLE_BY_TIER[tierKey].label : poiType.label;
+      // A city plans two guard posts, one per gate, and both used to print
+      // the identical name "Guard Post" -- which an audit surfaced as a pair
+      // of colliding labels reading "Guard Post / Guard Post". Two identical
+      // names on one map is a defect even when they don't overlap, so any POI
+      // type appearing more than once is distinguished by the compass bearing
+      // of the gate it guards, which is also how a real map would name them.
+      let displayLabel = poiKey === 'temple' ? TEMPLE_BY_TIER[tierKey].label : poiType.label;
+      if (poiPlan.filter((k) => k === poiKey).length > 1) {
+        if (!poiDirsUsed.has(poiKey)) poiDirsUsed.set(poiKey, new Set());
+        const taken = poiDirsUsed.get(poiKey);
+        const dir = compassOf(chosen.x - hubX, chosen.y - hubY, taken);
+        taken.add(dir);
+        displayLabel = `${dir} ${displayLabel}`;
+      }
       poiPlaced.push({ cell: chosen, poiKey, poiType, displayLabel });
     }
 
@@ -1124,7 +1681,7 @@ function renderSettlementMap(container, params) {
     // valid against the SAME angle the final rect is actually drawn at.
     function placeOrdinaryBuilding(cell, shrink, baseColor) {
       const targetAngle = nearestRoadAngle(cell.x, cell.y, buildingRng);
-      const rect = fitRectToPolygon(projectPolyAtAngle(cell.polygon, targetAngle), cellArea(cell));
+      const rect = fitRectToPolygon(projectPolyAtAngle(cell.polygon, targetAngle), cell.polygon);
       const maxDim = R * 0.3;
       let w = Math.max(4, rect.w * shrink), h = Math.max(4, rect.h * shrink);
       if (maxDim) { w = Math.min(w, maxDim); h = Math.min(h, maxDim); }
@@ -1177,10 +1734,40 @@ function renderSettlementMap(container, params) {
       // fill color lerping between two hand-picked-per-theme palette
       // endpoints, on every eligible cell (a dense packed town).
       const buildingTiers = BUILDING_TIERS[tierKey] || BUILDING_TIERS.village;
+
+      // RULES.md B4. Filling every eligible cell put a building on any open
+      // ground that merely cleared the streets, including the deep interior
+      // of a block -- which is what reads as buildings sprinkled at random
+      // rather than a town. An audit measured only 56-67% of them fronting a
+      // street against a 75% bar.
+      //
+      // So cells are ranked by how close they are to a street and the ones
+      // that front one are built first. The band is scaled to the cell's own
+      // size for the same reason B4's check is: it has to mean the same
+      // thing for a cottage plot and a cathedral plot.
+      //
+      // The fallback matters as much as the filter. Tightening placement has
+      // twice starved this generator (a town left holding 12 buildings, a
+      // city 27), so instead of a hard cutoff the back-of-block cells are
+      // kept in reserve, sorted nearest-first, and admitted only if the
+      // frontage cells alone don't reach the tier's minimum. Density is
+      // preserved by construction and cannot regress into that failure again.
+      const frontage = [], backland = [];
       for (const cell of mesh.cells) {
         if (claimedCellIdx.has(cell.index)) continue;
         const info = eligibleForPlot(cell);
         if (!info) continue;
+        const d = distToAnyStreet(cell.x, cell.y);
+        const reach = Math.sqrt(cellArea(cell)) * 0.75 + 6;
+        (d <= reach ? frontage : backland).push({ cell, info, d });
+      }
+      backland.sort((a, b) => a.d - b.d);
+      const minBuildings = Math.max(0, (config.minBuildings || 0) - poiPlaced.length);
+      const chosenCells = frontage.concat(
+        frontage.length >= minBuildings ? [] : backland.slice(0, minBuildings - frontage.length)
+      );
+
+      for (const { cell, info } of chosenCells) {
         const distFrac = info.frac;
 
         const weights = buildingTiers.map((t) => t.weight);
@@ -1205,9 +1792,16 @@ function renderSettlementMap(container, params) {
     // fill, an icon glyph, and a halo-text label (lib/map-labels.js) --
     // also road-facing, same reasoning as ordinary buildings above. The
     // temple gets its tier-specific size instead of the shared default.
+    // Labels are collected here and laid out in one pass after every POI and
+    // the castle are drawn (see placeHaloLabels below). Drawing each one at a
+    // fixed offset as it was reached meant two POIs in adjacent cells printed
+    // their names on top of each other -- RULES.md L2, which a 200-seed audit
+    // caught on maps the smaller sample never produced.
+    const pendingLabels = [];
+
     for (const p of poiPlaced) {
       const poiTargetAngle = nearestRoadAngle(p.cell.x, p.cell.y, poiRng);
-      const rect = fitRectToPolygon(projectPolyAtAngle(p.cell.polygon, poiTargetAngle), cellArea(p.cell));
+      const rect = fitRectToPolygon(projectPolyAtAngle(p.cell.polygon, poiTargetAngle), p.cell.polygon);
       const isTemple = p.poiKey === 'temple';
       const shrink = isTemple ? TEMPLE_BY_TIER[tierKey].shrink : 0.90;
       const maxDim = R * (isTemple ? TEMPLE_BY_TIER[tierKey].maxDimFrac : 0.35);
@@ -1216,7 +1810,12 @@ function renderSettlementMap(container, params) {
       drawPictorialBuilding(ctx, rect, w, h, { baseColor: palette.poiFill, ink: palette.ink, rng: poiRng });
       const dims = { w, h };
       drawSettlementPOIIcon(ctx, p.cell.x, p.cell.y - 8, p.poiType.iconKey, palette.ink);
-      drawHaloLabel(ctx, p.displayLabel, p.cell.x, p.cell.y + 11, undefined, undefined, { font: `bold 10px ${OW_SERIF}`, ink: palette.ink });
+      // Priority is the footprint's own size, so when two labels compete the
+      // larger structure keeps the spot next to it and the smaller one moves.
+      pendingLabels.push({
+        text: p.displayLabel, targetX: p.cell.x, targetY: p.cell.y,
+        font: `bold 10px ${OW_SERIF}`, ink: palette.ink, priority: w * h,
+      });
       // Market-day stalls: a handful of small tent triangles scattered
       // just around the square's own footprint -- the single most
       // recognizable "medieval market" visual cue.
@@ -1299,22 +1898,65 @@ function renderSettlementMap(container, params) {
       ctx.strokeStyle = palette.wall;
       ctx.lineWidth = Math.max(3, R * 0.02);
       ctx.stroke();
-      // Corner towers -- small squares at each bailey corner, same
-      // fortified-silhouette language as the main wall's towers below.
+      // Corner towers -- drums with an ink outline rather than flat filled
+      // squares, so they read as masonry in the same hand as everything else.
       const towerSize = Math.max(6, R * 0.045);
       for (const corner of corners) {
         ctx.fillStyle = palette.wall;
-        ctx.fillRect(corner.x - towerSize / 2, corner.y - towerSize / 2, towerSize, towerSize);
+        ctx.beginPath();
+        ctx.arc(corner.x, corner.y, towerSize * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = palette.ink;
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
       }
-      // The keep: a dominant rectangle inside the bailey, set back from the
+      // The keep: a dominant structure inside the bailey, set back from the
       // outer (town-wall-facing) edge toward the town side.
+      //
+      // This used to be drawFootprintRect -- one flat solid block of
+      // palette.wall, with no roof planes, no ridge and no ink outline, while
+      // every other building on the map is drawn by drawPictorialBuilding.
+      // On a contact sheet the castle was consistently the worst thing in
+      // frame: a plain dark rectangle at an odd angle that read as a sticker
+      // pasted onto the map rather than a building standing in the town. It
+      // is drawn in the same hand as everything else now, which also means it
+      // picks up the map's single light direction (RULES.md B3) for free.
       const keepHalfW = c.halfW * 0.42, keepHalfH = c.halfH * 0.55;
       const inward = -c.halfW * 0.25; // pulled toward the town, away from the outer wall
       const cosA = Math.cos(c.angle), sinA = Math.sin(c.angle);
       const keepRect = { cx: c.cx + inward * cosA, cy: c.cy + inward * sinA, angle: c.angle, w: keepHalfW * 2, h: keepHalfH * 2 };
-      drawFootprintRect(ctx, keepRect, 1, palette.wall);
-      drawHaloLabel(ctx, 'Castle', c.cx, c.cy + c.halfH + 11, undefined, undefined, { font: `bold 11px ${OW_SERIF}`, ink: palette.ink });
+      // No explicit wallColor: drawPictorialBuilding fills the whole box with
+      // it before insetting the roof, so passing palette.wall (a near-black
+      // timber brown) turned the keep back into the solid dark block this
+      // change set out to remove. Letting it derive a pale wash of its own
+      // roof tone is what every ordinary building already does.
+      // poiFill, not buildingRich. buildingRich is the darkest tone in every
+      // palette (#5a3a1e on parchment) and rendering the keep in it kept it
+      // reading as a black block no matter what the courtyard under it did.
+      // The castle is a landmark, so it belongs in the same visual register
+      // as the temple and the market hall -- which are already legible at
+      // this size against this ground.
+      drawPictorialBuilding(ctx, keepRect, keepHalfW * 2, keepHalfH * 2, {
+        baseColor: palette.poiFill,
+        ink: palette.ink,
+        rng: castleRng,
+      });
+      // Ranked above every POI: the castle is the largest thing on the map,
+      // so it is the one label that should never be the one that moves.
+      pendingLabels.push({
+        text: 'Castle', targetX: c.cx, targetY: c.cy + c.halfH,
+        font: `bold 11px ${OW_SERIF}`, ink: palette.ink, priority: Infinity,
+      });
     }
+
+    // Bounds are the generator's own coordinate space, not canvas.width --
+    // at print scale the bitmap is larger but the context is scaled to match,
+    // so the drawing coordinates still run 0..SETTLEMENT_CANVAS_SIZE.
+    // Any label with nowhere to go is dropped from the map; its POI is still
+    // named in the side panel below, so no information is actually lost.
+    placeHaloLabels(ctx, pendingLabels, {
+      width: SETTLEMENT_CANVAS_SIZE, height: SETTLEMENT_CANVAS_SIZE,
+    });
 
     ctx.restore(); // undo the terrain clip (no-op if none was applied)
 
@@ -1424,9 +2066,98 @@ function renderSettlementMap(container, params) {
     progress.done();
   }
 
+  // ---- server rendering ---------------------------------------------------
+  // Optional path: the Worker -> mapgen service draws the same map and
+  // checks it against RULES.md, re-rolling a layout that breaks a hard rule
+  // (the browser path can't). Everything below runs only from event
+  // handlers -- the mapgen service itself executes this view's render path
+  // headlessly, where Api/ServerMap don't exist.
+  let serverResult = null;     // the Worker's last response, while server mode is on
+  let serverRequestId = 0;     // discards a slow response that a newer request has overtaken
+
+  // The same params the browser path parsed above, in the shape the Worker
+  // validates. `guide` is the terrain height grid the overworld threads
+  // through; without it the server would draw flat ground and no longer
+  // match this page.
+  function serverParams() {
+    const out = { seed: overworldSeed, idx, name, tier: tierKey, x: clickX, y: clickY, coastal: params.get('coastal') || '0' };
+    for (const key of ['h', 'm', 'sea', 'guide', 'gw', 'gh', 'zoom']) {
+      const v = params.get(key);
+      if (v !== null && v !== '') out[key] = v;
+    }
+    return out;
+  }
+
+  async function renderOnServer() {
+    const statusEl = container.querySelector('#st-server-status');
+    const myRequest = ++serverRequestId;
+    const progress = showGenerationProgress(canvas, 'Rendering on server…');
+    statusEl.textContent = '';
+    try {
+      const res = await ServerMap.render({
+        type: 'settlement', params: serverParams(), scale: 2,
+        theme: container.querySelector('#st-theme').value,
+      });
+      const img = await ServerMap.loadImage(res.displayUrl);
+      if (myRequest !== serverRequestId) return;   // superseded, or the box was unticked
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      serverResult = res;
+
+      const poiEl = container.querySelector('#st-poi');
+      const labels = ServerMap.poiLabels(res.meta.meta);
+      poiEl.textContent = '';
+      if (labels.length) {
+        const h = document.createElement('h3');
+        h.textContent = 'Notable locations';
+        poiEl.appendChild(h);
+        for (const label of labels) {
+          const p = document.createElement('p');
+          p.textContent = label;
+          poiEl.appendChild(p);
+        }
+      }
+      const flaws = res.meta.violations || [];
+      statusEl.textContent = (res.cached ? 'Loaded from cache.' : 'Rendered on server.') +
+        (flaws.length ? ` Served with ${flaws.length} rule violation(s): ${flaws.map((f) => f.id).join(', ')}.` : ' Passed all rules.');
+    } catch (e) {
+      if (myRequest !== serverRequestId) return;
+      // Fall back to the browser render rather than leaving a blank canvas.
+      container.querySelector('#st-server').checked = false;
+      serverResult = null;
+      statusEl.textContent = ServerMap.describeError(e);
+      await generate();
+      return;
+    } finally {
+      progress.done();
+    }
+  }
+
+  container.querySelector('#st-server').addEventListener('change', (ev) => {
+    if (ev.target.checked) {
+      renderOnServer();
+    } else {
+      serverRequestId++;
+      serverResult = null;
+      container.querySelector('#st-server-status').textContent = '';
+      generate();
+    }
+  });
+
   generate();
-  container.querySelector('#st-theme').addEventListener('change', generate);
+  container.querySelector('#st-theme').addEventListener('change', () => {
+    if (serverResult) renderOnServer();
+    else generate();
+  });
   wireMapExportSave(container, canvas, 'st', async (offCtx) => {
+    // Server mode: export the Worker's stored 2x master instead of redrawing.
+    // offCtx is already scaled for the export, so drawing at the canvas's
+    // logical size lands on the master's full resolution.
+    if (serverResult) {
+      const master = await ServerMap.loadImage(serverResult.masterUrl);
+      offCtx.drawImage(master, 0, 0, canvas.width, canvas.height);
+      return;
+    }
     const prevCtx = ctx;
     ctx = offCtx;
     await generate();
