@@ -96,3 +96,5 @@ The copied `themes.js` now also reads the Worker's `/auth/session` (`BarnyardThe
 ### Reads send the login cookie (2026-10-08)
 
 `lib/api.js` now sends the login cookie on reads (`Api.get`) as well as writes, so a signed-in guest reads their own campaigns: the Worker (ClaudeRepo PR 307) gives each signed-in guest in the Campaign group their own space for notes, images and daily limits. Not signed in, nothing is sent and reads are the open, shared space exactly as before. `node test/api.test.js` guards it.
+
+Security audit 2026-10-08 (R2, R3): saved note images are now loaded with `crossOrigin="use-credentials"` (`lib/wikilink.js`), because the Worker requires the Campaign login for `/campaign/image`; this also makes embedded images work, which the Worker's Origin check had been refusing for plain `<img>` tags. The map key (`lib/keyed-legend.js`) escapes its labels. Reads of campaigns and notes need a login (ClaudeRepo PR 318), so a signed-out visitor sees an error instead of the owner's campaigns. `node test/images.test.js`.
