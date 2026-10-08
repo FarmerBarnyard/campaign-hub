@@ -133,3 +133,25 @@ canvas { background: #000; border: 1px solid var(--line); border-radius: 8px; ma
   canvas { max-width: 100%; width: 100%; height: auto; border: none; }
   body { background: #fff; }
 }
+
+/* Very wide screens (1900px and up; the page opts in with data-wide, see shell.css).
+   The shared cap is lifted and the room goes to side-by-side layouts. Tiles, maps and text keep
+   their size, so nothing is simply made bigger. */
+@media (min-width: 1900px) {
+  body[data-wide] .content { max-width: 2140px; }
+
+  /* Library and a campaign's notes: wider reading column, listed in two columns. */
+  body[data-wide] #app { max-width: 1760px; }
+  body[data-wide] .campaign-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body[data-wide] .campaign-list li:nth-child(-n+2) { border-top: 0; }
+  body[data-wide] #campaign-content > .tree-list { column-count: 2; column-gap: 56px; }
+  body[data-wide] #campaign-content > .tree-list > li { break-inside: avoid; }
+
+  /* A map page: the key / lore / places panel sits beside the map instead of far below it. */
+  body[data-wide] .content:has(.map-layout) #app { max-width: none; display: grid; grid-template-columns: minmax(0, max-content) minmax(320px, 560px); column-gap: 32px; align-items: start; justify-content: start; }
+  body[data-wide] .content:has(.map-layout) #app > * { grid-column: 1 / -1; }
+  body[data-wide] .content:has(.map-layout) #app > .map-layout { grid-column: 1; }
+  body[data-wide] .content:has(.map-layout) #app > .dungeon-key,
+  body[data-wide] .content:has(.map-layout) #app > .landmark-lore,
+  body[data-wide] .content:has(.map-layout) #app > .settlement-poi-panel { grid-column: 2; margin-top: 0; max-width: none; align-self: start; max-height: 80vh; overflow-y: auto; }
+}
