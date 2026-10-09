@@ -168,6 +168,7 @@ function renderDungeonMap(container) {
       <div class="map-controls">
         <label>Seed <input id="dg-seed" type="number" value="${Math.floor(Math.random() * 1e6)}"></label>
         <label>Theme <select id="dg-theme"></select></label>
+        ${ServerMap.toggleHtml('dg')}
         <label>Grid width (cells) <input id="dg-w" type="number" value="60"></label>
         <label>Grid height (cells) <input id="dg-h" type="number" value="40"></label>
         <label>Min room size <input id="dg-min" type="number" value="6"></label>
@@ -511,9 +512,23 @@ function renderDungeonMap(container) {
   }
 
   generate();
-  container.querySelector('#dg-regen').addEventListener('click', generate);
-  container.querySelector('#dg-theme').addEventListener('change', generate);
+  // The server draws from the same form values the browser reads (render.js makeDungeonStubs), so the
+  // seed and grid settings travel as params; the room key comes back as the generator's own markup.
+  const field = (id) => container.querySelector(`#dg-${id}`).value;
+  const server = ServerMap.attach({
+    container, prefix: 'dg', canvas, type: 'dungeon', regenerate: generate,
+    params: () => ({
+      seed: field('seed'), dw: field('w'), dh: field('h'), dmin: field('min'), ddepth: field('depth'),
+      legend: container.querySelector('#dg-legend').checked ? '1' : '0',
+    }),
+    theme: () => field('theme'),
+    onResult: (res) => ServerMap.fillPanel(container.querySelector('#dg-key'), res.meta.meta && res.meta.meta.roomKey),
+  });
+  const redraw = () => { if (server.active()) server.refresh(); else generate(); };
+  container.querySelector('#dg-regen').addEventListener('click', redraw);
+  container.querySelector('#dg-theme').addEventListener('change', redraw);
   wireMapExportSave(container, canvas, 'dg', async (offCtx) => {
+    if (await server.drawMaster(offCtx)) return;
     const prevCtx = ctx;
     ctx = offCtx;
     await generate();

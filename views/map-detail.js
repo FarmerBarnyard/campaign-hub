@@ -756,6 +756,7 @@ function renderDetailMap(container, params) {
     <div class="map-layout">
       <div class="map-controls">
         <label>Theme <select id="dt-theme"></select></label>
+        ${ServerMap.toggleHtml('dt')}
         <p class="status-text">Derived from overworld seed ${overworldSeed} at this location (${locationLabel}) -- fixed, can't be reseeded independently.</p>
         <hr>
         <button id="dt-export">Export PNG</button>
@@ -842,8 +843,14 @@ function renderDetailMap(container, params) {
 
   generate();
   container.querySelector('#dt-heading').textContent = lastLandmarkName ? `${lastLandmarkName} (${locationLabel} detail map)` : `Detail map (${locationLabel})`;
-  container.querySelector('#dt-theme').addEventListener('change', generate);
-  wireMapExportSave(container, canvas, 'dt', (offCtx) => {
+  const server = ServerMap.attach({
+    container, prefix: 'dt', canvas, type: 'detail', regenerate: generate,
+    params: () => Object.fromEntries(params),
+    theme: () => container.querySelector('#dt-theme').value,
+  });
+  container.querySelector('#dt-theme').addEventListener('change', () => { if (server.active()) server.refresh(); else generate(); });
+  wireMapExportSave(container, canvas, 'dt', async (offCtx) => {
+    if (await server.drawMaster(offCtx)) return;
     const prevCtx = ctx;
     ctx = offCtx;
     generate();

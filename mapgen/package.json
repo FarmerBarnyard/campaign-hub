@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "spike": "node src/spike.js",
     "audit": "node src/audit.js",
+    "audit-types": "node src/audit-types.js",
     "smoke": "node src/smoke.js",
     "design-review": "node src/design-review.js"
   },

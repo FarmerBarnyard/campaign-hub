@@ -24,7 +24,7 @@ const PORT = parseInt(process.env.MAPGEN_PORT, 10) || 8791;
 // Bumped whenever the art changes. It is part of the Worker's cache key, so
 // bumping it is what retires every cached map at once -- without it, an art
 // fix would be invisible to anyone whose map was already generated.
-const GENERATOR_VERSION = '1';
+const GENERATOR_VERSION = '2';
 
 const TYPES = new Set(['settlement', 'dungeon', 'detail', 'landmark', 'overworld']);
 // Only these reach the generators. An allow-list rather than a block-list:
@@ -46,6 +46,11 @@ const ALLOWED_PARAMS = new Set([
   // settings, rivers, sea, forest/rugged bias, wildzone, scale) plus the
   // window's own x, y and width (wx, wy, ww). Same names as lib/map-window.js.
   'oc', 'oo', 'oi', 'orv', 'os', 'ofb', 'orb', 'owz', 'osc', 'wx', 'wy', 'ww',
+  // Landmark (views/map-landmark.js): the wild zone and site it was clicked on, and the label it carries.
+  'zone', 'poi', 'poiLabel', 'poiName', 'tile',
+  // Dungeon (makeDungeonStubs in render.js): grid size, smallest room, split depth. The seed is `seed`
+  // and the legend switch is `legend`.
+  'dw', 'dh', 'dmin', 'ddepth',
 ]);
 
 const MAX_BODY_BYTES = 16 * 1024;   // a params object (guide grid included), nothing more
