@@ -442,7 +442,17 @@ function renderSettlementMap(container, params) {
   `;
   container.querySelector('#st-heading').textContent = `${name} (${tierKey})`;
 
-  populateCampaignSelect(container.querySelector('#st-campaign'));
+  // Started from a Location note (see lib/map-link.js): file the map in that campaign, name it after
+  // the place, remember which note it belongs to, and let the way back lead to the campaign.
+  const fromCampaign = params.get('campaign') || '';
+  const fromLocation = params.get('location') || '';
+  populateCampaignSelect(container.querySelector('#st-campaign'), fromCampaign);
+  if (fromLocation) container.querySelector('#st-filename').value = MapLink.safeName(fromLocation, 'map') + '.png';
+  if (fromCampaign) {
+    const back = container.querySelector('p > a');
+    back.href = `#/campaign?name=${encodeURIComponent(fromCampaign)}`;
+    back.textContent = `← Back to ${fromCampaign}`;
+  }
   populateThemeSelect(container.querySelector('#st-theme'));
 
   const canvas = container.querySelector('#st-canvas');
@@ -2162,5 +2172,5 @@ function renderSettlementMap(container, params) {
     ctx = offCtx;
     await generate();
     ctx = prevCtx;
-  });
+  }, () => ({ route: 'map/settlement', params, title: name, location: fromLocation }));
 }

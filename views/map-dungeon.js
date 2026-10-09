@@ -1,4 +1,5 @@
-function populateCampaignSelect(selectEl) {
+// `preferred` (optional) is the campaign to pick when it exists, e.g. the one a map was started from.
+function populateCampaignSelect(selectEl, preferred) {
   Api.get('/campaigns').then((data) => {
     selectEl.innerHTML = '';
     if (!data.campaigns.length) {
@@ -14,6 +15,7 @@ function populateCampaignSelect(selectEl) {
       opt.textContent = c.name;
       selectEl.appendChild(opt);
     }
+    if (preferred && data.campaigns.some((c) => c.name === preferred)) selectEl.value = preferred;
   }).catch(() => { });
 }
 
@@ -25,7 +27,11 @@ function populateCampaignSelect(selectEl) {
 // get genuinely redrawn at the higher pixel density (crisper when
 // printed/zoomed) instead of just being stretched and blurred. Omitting it
 // falls back to exporting the on-screen canvas exactly as before.
-function wireMapExportSave(container, canvas, prefix, renderAtScale) {
+//
+// `mapInfo` is optional too: `() => ({route, params, title, location})` describing how this map was
+// made. When given, Save also writes a small map note (Maps/<name>.md, see lib/map-link.js) beside
+// the picture, so the map can be reopened from its note and linked from other notes by name.
+function wireMapExportSave(container, canvas, prefix, renderAtScale, mapInfo) {
   const EXPORT_SCALE = 2;
 
   // `renderAtScale` may now be an async function (every generate() in this
@@ -63,6 +69,25 @@ function wireMapExportSave(container, canvas, prefix, renderAtScale) {
     try {
       const res = await Api.post('/map/save-image', { campaign, filename, dataUrl: (await exportSource()).toDataURL('image/png') });
       statusEl.textContent = `Saved. Paste ${res.wikilink} into a note to link it.`;
+      // The map note (how it was made, where it belongs). A failure here never undoes the picture.
+      const info = mapInfo ? mapInfo() : null;
+      const note = info ? MapLink.buildMapNote({ ...info, image: filename }) : null;
+      if (note) {
+        let savedAs = null;
+        for (let n = 1; n <= 4 && !savedAs; n++) {
+          try {
+            const path = MapLink.notePath(note.title, n);
+            await Api.post('/note', { campaign, path, frontmatter: note.frontmatter, body: note.body });
+            savedAs = path;
+          } catch (err) {
+            if (!(err.data && err.data.error === 'file_exists')) break;
+          }
+        }
+        const name = savedAs ? savedAs.replace(/^Maps\//, '').replace(/\.md$/, '') : '';
+        statusEl.textContent = savedAs
+          ? `Saved the picture and a map note. Link it from a note with [[${name}]] or ${res.wikilink}.`
+          : `Saved the picture (${res.wikilink}); the map note could not be saved.`;
+      }
     } catch (e) {
       if (e.code === 'unauthenticated') {
         statusEl.textContent = 'You need to be logged in to save maps. Log in (top of page) and try again.';

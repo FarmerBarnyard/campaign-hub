@@ -313,5 +313,5 @@ function renderLandmarkMap(container, params) {
     ctx = offCtx;
     generate();
     ctx = prevCtx;
-  });
+  }, () => ({ route: 'map/landmark', params, title: poiName, location: '' }));
 }

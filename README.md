@@ -108,3 +108,28 @@ The local model writes at a few tokens a second, so one note takes minutes; aske
 - The panel shows only when the Worker has `CAMPAIGN_ENGINE_ENABLED`; it says "Engine online/offline", how many generated notes are left today, and keeps your jobs for 14 days.
 - New files: `lib/engine.js` (wording, paths, polling rules, the API calls), `views/jobs.js` (the panel and the single-note job). Everything a model wrote goes in through `textContent` / `.value`, never as markup. Cache version `?v=54`.
 - Tests: `node test/engine.test.js` (10), plus the existing three. Checked in a real browser against a fake Worker and engine (queue a pack, live progress, a failed note, review and edit, save with a name clash, Cancel, the single-note job, the offline fallback).
+
+## Linking maps and notes -- 2026-10-09
+
+A saved map used to be only a picture (`Images/<name>.png`): nothing said how it was made, and a note could reach it only if you pasted its image link by hand. Now **Save to campaign** also writes a small **map note** beside the picture (`Maps/<name>.md`, see `lib/map-link.js`):
+
+```
+---
+tags: [M]
+Map_Type: settlement
+Map_Route: map/settlement
+Map_Params: seed=2023872551&idx=0&name=Saltgate&tier=city      the same URL parameters the page uses
+Image: Saltgate.png
+Location: Saltgate                                              the note it was drawn for, if any
+---
+# Saltgate
+![[Saltgate.png]]
+Location: [[Saltgate]]
+```
+
+- **It is an ordinary note.** It shows in the library under Maps, can be linked from any note with `[[Saltgate]]`, and shows its picture. No Worker change: notes were always free-form frontmatter plus a body.
+- **Open map:** a map note whose frontmatter carries `Map_Route` and `Map_Params` gets an **Open map** button that redraws the very same map. Only the generators whose whole state is in the page address are reopenable (settlement, detail, landmark); overworld and dungeon maps are saved as a picture with a note that says so. The route must be a known generator and the parameters a plain query string, or no button is shown.
+- **Draw a settlement map:** a Location note (tag A) offers a size (village, town, city) and a button that opens the settlement generator seeded from the note's title, so the same place always draws the same town. The campaign is preselected, the file is named after the place, "Back" leads to the campaign, and Save links the map note back to the Location (`Location: [[Saltgate]]`). Notes are write-once on the server, so the link is made from the map note's side.
+- A map note name that is taken gets "(2)"; a failure writing the note never undoes the picture. The parameters sent to the render service never include the campaign or location.
+- New file `lib/map-link.js`; `wireMapExportSave` takes an optional map description; cache version `?v=55`.
+- Tests: `node test/map-link.test.js` (11). Checked in a real browser against a fake Worker: draw from a Location note, the pre-filled campaign and file name, Save (picture and map note), a second Save (numbered), and opening the saved map from its note.
