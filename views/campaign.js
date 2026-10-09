@@ -129,6 +129,29 @@ async function viewNote(campaign, relPath) {
     }
     bodyEl.appendChild(fmTable);
 
+    // Maps and notes (lib/map-link.js): a map note reopens its map exactly as saved; a Location
+    // note can have a settlement drawn for it, filed back under this campaign and linked to it.
+    const mapActions = document.createElement('div');
+    mapActions.className = 'note-map-actions';
+    const reopen = MapLink.mapHash(note.frontmatter);
+    const noteTitle = relPath.split('/').pop().replace(/\.md$/, '');
+    if (reopen) {
+      const open = document.createElement('button');
+      open.textContent = 'Open map';
+      open.addEventListener('click', () => { modal.remove(); location.hash = reopen; });
+      mapActions.appendChild(open);
+    } else if (MapLink.isLocation(note.frontmatter)) {
+      const tier = document.createElement('select');
+      tier.setAttribute('aria-label', 'Settlement size');
+      for (const t of MapLink.TIERS) { const o = document.createElement('option'); o.value = t; o.textContent = t.charAt(0).toUpperCase() + t.slice(1); if (t === 'town') o.selected = true; tier.appendChild(o); }
+      const draw = document.createElement('button');
+      draw.textContent = 'Draw a settlement map';
+      draw.addEventListener('click', () => { modal.remove(); location.hash = MapLink.settlementHash(noteTitle, tier.value, campaign); });
+      mapActions.appendChild(tier);
+      mapActions.appendChild(draw);
+    }
+    if (mapActions.childNodes.length) bodyEl.appendChild(mapActions);
+
     const bodyDiv = document.createElement('div');
     bodyDiv.className = 'note-body';
     bodyEl.appendChild(bodyDiv);

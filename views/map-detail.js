@@ -707,5 +707,5 @@ function renderDetailMap(container, params) {
     ctx = offCtx;
     generate();
     ctx = prevCtx;
-  });
+  }, () => ({ route: 'map/detail', params, title: lastLandmarkName ? `${lastLandmarkName} detail map` : `Detail map (${locationLabel})`, location: '' }));
 }
