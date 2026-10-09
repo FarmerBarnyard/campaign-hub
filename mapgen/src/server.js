@@ -42,6 +42,10 @@ const ALLOWED_PARAMS = new Set([
   // straight off browser form controls with no params argument of its own.
   'cells', 'octaves', 'sea', 'forestBias', 'ruggedBias', 'island', 'rivers',
   'wildzones', 'legend', 'settle', 'tileCols', 'tileRows',
+  // Zoom window: the overworld address (continent cells, octaves, ocean/inland
+  // settings, rivers, sea, forest/rugged bias, wildzone, scale) plus the
+  // window's own x, y and width (wx, wy, ww). Same names as lib/map-window.js.
+  'oc', 'oo', 'oi', 'orv', 'os', 'ofb', 'orb', 'owz', 'osc', 'wx', 'wy', 'ww',
 ]);
 
 const MAX_BODY_BYTES = 16 * 1024;   // a params object (guide grid included), nothing more
