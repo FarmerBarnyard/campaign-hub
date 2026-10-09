@@ -155,3 +155,34 @@ canvas { background: #000; border: 1px solid var(--line); border-radius: 8px; ma
   body[data-wide] .content:has(.map-layout) #app > .landmark-lore,
   body[data-wide] .content:has(.map-layout) #app > .settlement-poi-panel { grid-column: 2; margin-top: 0; max-width: none; align-self: start; max-height: 80vh; overflow-y: auto; }
 }
+
+/* The engine panel on a campaign: a pack form, jobs with live progress, drafts to review (views/jobs.js). Theme tokens only. */
+.engine-panel { margin: 18px 0 24px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); max-width: 860px; }
+.engine-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+.engine-head h3 { margin: 0; font: 600 17px var(--font-display); color: var(--fg-strong); }
+.engine-pill { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; background: var(--panel-2); color: var(--fg-dim); font-size: 12px; font-weight: 500; }
+.engine-pill.is-on { background: var(--ok-soft); color: var(--ok); }
+.engine-pill.is-off { background: var(--alert-soft); color: var(--alert); }
+.engine-form { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.engine-form textarea, .engine-form input:not([type="checkbox"]), .engine-form select { width: 100%; max-width: 100%; }
+.engine-form select { width: auto; }
+.engine-kinds { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.engine-kind { display: inline-flex; align-items: center; gap: 4px; font-size: 13.5px; }
+.engine-jobs { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.engine-job { padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.engine-job.is-active { border-color: var(--accent); }
+.engine-job-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.engine-job-title { color: var(--fg-strong); overflow-wrap: anywhere; }
+.engine-bar { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+.engine-bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+.engine-job-actions { display: flex; gap: 8px; margin-top: 10px; }
+.engine-job-actions button[hidden] { display: none; }
+.engine-bible { margin-top: 10px; font-size: 13px; }
+.engine-bible p { white-space: pre-line; margin-top: 6px; }
+.engine-drafts { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.engine-draft { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.engine-draft.is-failed { border-color: var(--alert); }
+.engine-draft-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; cursor: pointer; }
+.engine-draft-body { margin-top: 8px; }
+.engine-draft-body input, .engine-draft-body textarea { display: block; width: 100%; margin-top: 8px; font: 13px var(--font-mono); }
+@media (prefers-reduced-motion: reduce) { .engine-bar-fill { transition: none; } }

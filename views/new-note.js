@@ -22,6 +22,7 @@ async function renderNewNote(container, params) {
       </label>
       <div class="nn-actions">
         <button type="button" id="nn-generate">Generate draft with Ollama</button>
+        <button type="button" id="nn-cancel" hidden>Cancel</button>
         <span id="nn-generate-status" class="status-text"></span>
       </div>
       <label>Body
@@ -62,11 +63,44 @@ async function renderNewNote(container, params) {
     const statusEl = container.querySelector('#nn-generate-status');
     const brief = container.querySelector('#nn-brief').value.trim();
     if (!brief) { statusEl.textContent = 'Write a brief first.'; return; }
-    statusEl.textContent = 'Generating on the self-hosted model… this can take 30–90s or longer (CPU inference, not a hosted API).';
 
     const hints = {};
     for (const f in fieldInputs) { if (fieldInputs[f].value) hints[f] = fieldInputs[f].value; }
     const tone = container.querySelector('#nn-tone').value.trim();
+
+    // With the engine switched on and running, the draft is a background job: it can take as long as
+    // the model needs, shows its progress, and can be cancelled. Otherwise the old direct route is
+    // used (one request that waits, and often times out on this server's CPU model).
+    let engine = { use: false, reason: 'off' };
+    try { engine = EngineHelpers.engineUsable(await EngineApi.status()); } catch (e) { /* signed out or unreachable: the direct route reports it */ }
+    if (engine.use) {
+      const generate = container.querySelector('#nn-generate');
+      const cancel = container.querySelector('#nn-cancel');
+      generate.disabled = true;
+      cancel.hidden = false;
+      statusEl.textContent = 'Queuing…';
+      const job = runNoteJob({ campaign, kind, brief, hints, tone, onStatus: (t) => { statusEl.textContent = t; } });
+      cancel.onclick = () => { cancel.disabled = true; job.cancel(); };
+      try {
+        const draft = await job.promise;
+        for (const f in fieldInputs) {
+          if (draft.frontmatter[f] !== undefined && draft.frontmatter[f] !== null) fieldInputs[f].value = Array.isArray(draft.frontmatter[f]) ? draft.frontmatter[f].join(', ') : draft.frontmatter[f];
+        }
+        const titleInput = container.querySelector('#nn-title');
+        if (!titleInput.value.trim() && draft.title) titleInput.value = draft.title;
+        container.querySelector('#nn-body').value = draft.body.trim();
+        statusEl.textContent = 'Draft ready — review before saving.';
+      } catch (e) {
+        statusEl.textContent = e.message || 'Generation failed. You can still write the note by hand.';
+      }
+      generate.disabled = false;
+      cancel.hidden = true;
+      cancel.disabled = false;
+      return;
+    }
+    statusEl.textContent = engine.reason === 'offline'
+      ? 'The engine is offline, so trying the direct route (it may time out). Generating on the self-hosted model… this can take 30–90s or longer.'
+      : 'Generating on the self-hosted model… this can take 30–90s or longer (CPU inference, not a hosted API).';
 
     try {
       const draft = await Api.post('/generate-draft', { campaign, kind, brief, hints, tone });

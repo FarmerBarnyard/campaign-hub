@@ -17,6 +17,7 @@ async function renderCampaign(container, params) {
     <p><a href="#/">&larr; Library</a></p>
     <h2>${escapeHtml(campaign)}</h2>
     <div class="kind-buttons" id="kind-buttons"></div>
+    <div id="engine-root"></div>
     <div id="campaign-content">Loading&hellip;</div>
   `;
 
@@ -28,6 +29,10 @@ async function renderCampaign(container, params) {
     btn.textContent = `+ ${KIND_LABELS[kind]}`;
     kindButtons.appendChild(btn);
   }
+
+  // The engine panel (packs of linked notes, written in the background) shows only when the Worker
+  // has the engine switched on; it never blocks the note list.
+  Api.get('/schema').then((schemas) => renderJobsPanel(container.querySelector('#engine-root'), campaign, schemas)).catch(() => {});
 
   const contentEl = container.querySelector('#campaign-content');
   await loadCampaignTree(contentEl, campaign);
