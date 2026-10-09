@@ -43,6 +43,7 @@ const LIB_FILES = [
   'lib/dungeon-lore.js',
   'lib/dungeon-props.js',
   'lib/settlement-poi.js',
+  'lib/overworld-world.js',
 ];
 
 // map-dungeon.js is required by the others: it defines the shared
