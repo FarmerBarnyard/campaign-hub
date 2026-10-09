@@ -1088,7 +1088,7 @@ function drawSettlementIcon(ctx, tier, cx, cy, r) {
 // cells have no polygon of their own. lib/voronoi-mesh.js's actual
 // Delaunay/Voronoi code is untouched -- views/map-settlement.js still uses
 // it for an unrelated generator.
-function renderOverworldMap(container) {
+function renderOverworldMap(container, params) {
   container.innerHTML = `
     <h2>Overworld map generator</h2>
     <div class="map-layout">
@@ -1126,10 +1126,27 @@ function renderOverworldMap(container) {
         <button id="ow-export-tiles">Export print tiles (.zip)</button>
         <p id="ow-export-tiles-status" class="status-text"></p>
         <hr>
+        <p class="zoom-heading">Zoom to an area</p>
+        <button id="ow-zoom-tool" type="button" aria-pressed="false">Select an area&hellip;</button>
+        <label>Zoom <select id="ow-zoom-level">
+          <option value="2">2x</option>
+          <option value="3">3x</option>
+          <option value="4" selected>4x</option>
+          <option value="6">6x</option>
+          <option value="8">8x</option>
+          <option value="12">12x</option>
+          <option value="custom" hidden disabled>Custom</option>
+        </select></label>
+        <button id="ow-zoom-go" type="button" disabled>Open zoomed map</button>
+        <p id="ow-zoom-status" class="status-text"></p>
+        <hr>
         <p id="ow-settlement-action" class="status-text"></p>
         <p id="ow-theme-suggestion" class="status-text"></p>
       </div>
-      <canvas id="ow-canvas" width="800" height="600"></canvas>
+      <div class="ow-canvas-wrap">
+        <canvas id="ow-canvas" width="800" height="600" aria-label="Overworld map"></canvas>
+        <div id="ow-select-box" class="ow-select-box" hidden></div>
+      </div>
     </div>
   `;
 
@@ -1148,6 +1165,15 @@ function renderOverworldMap(container) {
   // to work from this remembered screen-position list rather than the DOM.
   let currentSeed = 0;
   let currentSettlements = [];
+  let lastSettings = null;
+
+  // "Zoom to an area" (views/map-zoom-select.js): draws the box and opens the zoomed map for it. It reads
+  // the settings the map on screen was drawn with, not the controls (which may have been changed since).
+  const zoomTool = wireZoomSelect(container, canvas, {
+    settings: () => lastSettings,
+    cellsAcross: (win) => (worldCache ? MapWindow.cellsAcross(win, worldCache) : null),
+    open: (win) => { location.hash = `#/map/detail?${MapWindow.toParams(win)}`; },
+  });
 
   // Hydraulic erosion is a one-time cost (~0.3-0.9s at this grid's
   // resolution, measured in the Step 0 prototype) that must never re-run on
@@ -1274,7 +1300,17 @@ function renderOverworldMap(container) {
     const legendOn = container.querySelector('#ow-legend').checked;
     const settleCount = parseInt(container.querySelector('#ow-settle').value, 10) || 0;
     const wildZonesOn = container.querySelector('#ow-wildzones').checked;
-    const theme = MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
+    // What this map is drawn from, in the form a zoom window's address carries it (lib/map-window.js).
+    const previousSettings = JSON.stringify(lastSettings);
+    lastSettings = {
+      seed, cells: cellCount, octaves, island, rivers: riversOn, settle: settleCount, sea: seaLevel,
+      forestBias: parseInt(container.querySelector('#ow-forest-bias').value, 10) || 0,
+      ruggedBias: parseInt(container.querySelector('#ow-rugged-bias').value, 10) || 0,
+      wildZones: wildZonesOn, continent: container.querySelector('#ow-scale').value === 'continent',
+    };
+    // A different map makes any selected box meaningless; a redraw of the same one (a theme change) keeps it.
+    if (!fast && JSON.stringify(lastSettings) !== previousSettings) zoomTool.reset();
+    const theme =MAP_THEMES[container.querySelector('#ow-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
     const palette = theme.overworld;
 
     // hillsT/mountainsT/snowT mirror biomeAt's own internal height
@@ -2108,9 +2144,13 @@ function renderOverworldMap(container) {
     const btn = document.createElement('button');
     btn.type = 'button';
     const zoneOn = container.querySelector('#ow-wildzones').checked && landHit.zone;
-    btn.textContent = `Generate detail map here (${zoneOn ? landHit.zone.label : landHit.biome}) →`;
+    // A zoomed window of this map (lib/map-window.js), not a fresh patch: the same coast, rivers and
+    // biomes at 4x around the click. The "Select an area" tool above picks other sizes.
+    btn.textContent = `Zoom in here, 4x (${zoneOn ? landHit.zone.label : landHit.biome}) →`;
     btn.addEventListener('click', () => {
-      location.hash = buildDetailMapUrl(landHit.x, landHit.y, landHit.gx, landHit.gy, landHit.biome, zoneOn ? landHit.zone : null, '');
+      if (!lastSettings) return;
+      const box = MapWindow.fromCentre(landHit.x, landHit.y, 4, canvas.width, canvas.height);
+      location.hash = `#/map/detail?${MapWindow.toParams(Object.assign({}, lastSettings, box))}`;
     });
     actionEl.appendChild(btn);
   });
@@ -2185,7 +2225,25 @@ function renderOverworldMap(container) {
     settleEl.max = p.settleMax; settleEl.value = p.settleValue;
   }
 
-  generate(false);
+  // Coming back from a zoomed map (its "Back to overworld map" link carries the window's address):
+  // put every control back as it was so the same map is drawn, then show the box that was zoomed into.
+  const restoreWin = MapWindow.parse(params);
+  if (restoreWin) {
+    const scaleEl = container.querySelector('#ow-scale');
+    scaleEl.value = restoreWin.continent ? 'continent' : 'standard';
+    applyScalePreset(scaleEl.value);
+    container.querySelector('#ow-seed').value = restoreWin.seed;
+    container.querySelector('#ow-cells').value = restoreWin.cells;
+    container.querySelector('#ow-oct').value = restoreWin.octaves;
+    container.querySelector('#ow-sea').value = Math.round(restoreWin.sea * 100);
+    container.querySelector('#ow-forest-bias').value = restoreWin.forestBias;
+    container.querySelector('#ow-rugged-bias').value = restoreWin.ruggedBias;
+    container.querySelector('#ow-island').checked = restoreWin.island;
+    container.querySelector('#ow-rivers').checked = restoreWin.rivers;
+    container.querySelector('#ow-wildzones').checked = restoreWin.wildZones;
+    container.querySelector('#ow-settle').value = restoreWin.settle;
+  }
+  generate(false).then(() => { if (restoreWin) zoomTool.show({ wx: restoreWin.wx, wy: restoreWin.wy, ww: restoreWin.ww }); });
   container.querySelector('#ow-regen').addEventListener('click', () => generate(false));
   container.querySelector('#ow-theme').addEventListener('change', () => generate(false));
   container.querySelector('#ow-scale').addEventListener('change', (evt) => {

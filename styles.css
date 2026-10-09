@@ -89,6 +89,14 @@
 canvas { background: #000; border: 1px solid var(--line); border-radius: 8px; max-width: 100%; }
 /* Beside the controls the canvas may shrink to fit the row (keeping its shape) instead of wrapping underneath them. */
 .map-layout canvas { flex: 0 1 auto; min-width: 0; height: auto; }
+/* The overworld canvas sits in a wrapper so the "Zoom to an area" box can be laid over it. */
+.ow-canvas-wrap { position: relative; flex: 0 1 auto; min-width: 0; line-height: 0; border-radius: 8px; overflow: hidden; }
+.ow-canvas-wrap canvas { display: block; }
+.ow-canvas-wrap.selecting canvas { cursor: crosshair !important; touch-action: none; outline: 2px solid var(--accent); outline-offset: -2px; }
+.ow-select-box { position: absolute; box-sizing: border-box; pointer-events: none; border: 2px solid #fff; outline: 1px solid #000; box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35); }
+.zoom-heading { margin: 0; font-size: 13px; font-weight: 600; color: var(--fg-strong); }
+.zoom-nav { display: flex; flex-wrap: wrap; gap: 6px; }
+.zoom-nav button { flex: 1 1 auto; }
 @media (min-width: 861px) { .map-layout { flex-wrap: nowrap; } }
 #app input[type="checkbox"], #app .map-controls input[type="checkbox"] { width: 18px; height: 18px; min-height: 0; padding: 0; margin: 3px 0; accent-color: var(--accent); }
 

@@ -88,10 +88,18 @@ async function renderWindowMap(container, params, w) {
 
   container.innerHTML = `
     <h2 id="dt-heading">Zoomed map</h2>
-    <p><a href="#/map/overworld">&larr; Back to overworld map</a></p>
+    <p><a id="dt-back" href="#/map/overworld">&larr; Back to overworld map</a></p>
     <div class="map-layout">
       <div class="map-controls">
         <label>Theme <select id="dt-theme"></select></label>
+        <div class="zoom-nav" role="group" aria-label="Move or zoom this map">
+          <button type="button" data-nav="left" aria-label="Move left">&larr;</button>
+          <button type="button" data-nav="up" aria-label="Move up">&uarr;</button>
+          <button type="button" data-nav="down" aria-label="Move down">&darr;</button>
+          <button type="button" data-nav="right" aria-label="Move right">&rarr;</button>
+          <button type="button" data-nav="in">Zoom in</button>
+          <button type="button" data-nav="out">Zoom out</button>
+        </div>
         <p class="status-text" id="dt-note"></p>
         <hr>
         <button id="dt-export">Export PNG</button>
@@ -110,6 +118,23 @@ async function renderWindowMap(container, params, w) {
   const noteEl = container.querySelector('#dt-note');
   const headingEl = container.querySelector('#dt-heading');
   headingEl.textContent = `Zoomed map (${zoomText}x)`;
+
+  // Back to the overworld with its settings and this box, so it is the same map, box shown.
+  container.querySelector('#dt-back').href = `#/map/overworld?${MapWindow.toParams(w)}`;
+  // Move and zoom by changing the address: the page redraws from the cached world, so it is quick.
+  const go = (box) => { location.hash = `#/map/detail?${MapWindow.toParams(Object.assign({}, w, box))}`; };
+  const box = { wx: w.wx, wy: w.wy, ww: w.ww };
+  const step = w.ww / 2;
+  const navTo = {
+    left: () => MapWindow.nudge(box, -step, 0), right: () => MapWindow.nudge(box, step, 0),
+    up: () => MapWindow.nudge(box, 0, -step), down: () => MapWindow.nudge(box, 0, step),
+    in: () => MapWindow.withZoom(box, zoom * 1.5), out: () => MapWindow.withZoom(box, zoom / 1.5),
+  };
+  container.querySelectorAll('.zoom-nav button').forEach((btn) => {
+    btn.addEventListener('click', () => go(navTo[btn.dataset.nav]()));
+  });
+  container.querySelector('[data-nav="in"]').disabled = w.ww <= 1 / MapWindow.MAX_ZOOM + 0.0001;
+  container.querySelector('[data-nav="out"]').disabled = w.ww >= 0.9999;
 
   // Rebuilding the overworld takes seconds the first time (it is cached afterwards, and shared with
   // the overworld page), so the progress overlay goes up first.

@@ -57,6 +57,7 @@ const VIEW_FILES = [
   'views/map-settlement.js',
   'views/map-detail.js',
   'views/map-window.js',
+  'views/map-zoom-select.js',
   'views/map-landmark.js',
 ];
 
