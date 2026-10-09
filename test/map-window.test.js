@@ -45,6 +45,15 @@ test("the address is short and uses only characters a saved map note accepts", f
   assert.strictEqual(MapLink.mapHash({ Map_Route: "map/detail", Map_Params: text }), "#/map/detail?" + text);
 });
 
+test("a saved zoomed map reopens at the same window from its map note", function () {
+  var text = MW.toParams(MW.parse(q(base)));
+  var note = MapLink.buildMapNote({ route: "map/detail", params: new URLSearchParams(text), title: "Gullharbor zoomed map", image: "Gullharbor zoomed map.png", location: "" });
+  assert.strictEqual(note.frontmatter.Map_Route, "map/detail");
+  assert.strictEqual(note.frontmatter.Map_Params, text);
+  assert.strictEqual(MapLink.mapHash(note.frontmatter), "#/map/detail?" + text);
+  assert.deepStrictEqual(MW.parse(q(note.frontmatter.Map_Params)), MW.parse(q(base)));
+});
+
 test("a window is snapped to something the map can show", function () {
   var tooSmall = MW.clamp(0.5, 0.5, 0.01);
   assert.strictEqual(tooSmall.ww, Math.round(10000 / MW.MAX_ZOOM) / 10000);
