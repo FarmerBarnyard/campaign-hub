@@ -44,6 +44,7 @@ const LIB_FILES = [
   'lib/dungeon-props.js',
   'lib/settlement-poi.js',
   'lib/overworld-world.js',
+  'lib/map-window.js',
 ];
 
 // map-dungeon.js is required by the others: it defines the shared
@@ -55,6 +56,7 @@ const VIEW_FILES = [
   'views/map-overworld.js',
   'views/map-settlement.js',
   'views/map-detail.js',
+  'views/map-window.js',
   'views/map-landmark.js',
 ];
 

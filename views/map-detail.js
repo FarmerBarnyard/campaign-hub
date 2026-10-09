@@ -166,6 +166,80 @@ function parseGuideParam(params) {
   };
 }
 
+// A river as the overworld has it is a line of cell centres, a few pixels apart on the overworld and
+// dozens once zoomed in. This puts a gentle bend between each pair (never moving the existing points,
+// so a river still passes through the overworld's own cells) and rounds the result with Chaikin
+// corner-cutting, carrying each point's flow along so the width can still grow downstream.
+function refineRiverChain(points, rng) {
+  // Two rounds of midpoint bending, the second finer than the first, so a river wanders at more than
+  // one scale instead of zig-zagging evenly.
+  let pts = points;
+  for (const amount of [0.6, 0.4]) {
+    const bent = [pts[0]];
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const bend = (rng() - 0.5) * len * amount;
+      bent.push({ x: (a.x + b.x) / 2 - (dy / len) * bend, y: (a.y + b.y) / 2 + (dx / len) * bend, flow: (a.flow + b.flow) / 2 });
+      bent.push(b);
+    }
+    pts = bent;
+  }
+  for (let iter = 0; iter < 2; iter++) {
+    const next = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i], p1 = pts[i + 1];
+      next.push({ x: p0.x + (p1.x - p0.x) * 0.25, y: p0.y + (p1.y - p0.y) * 0.25, flow: p0.flow + (p1.flow - p0.flow) * 0.25 });
+      next.push({ x: p0.x + (p1.x - p0.x) * 0.75, y: p0.y + (p1.y - p0.y) * 0.75, flow: p0.flow + (p1.flow - p0.flow) * 0.75 });
+    }
+    pts = [pts[0], ...next, pts[pts.length - 1]];
+  }
+  return pts;
+}
+
+// A window's rivers and lakes, drawn from the overworld's own flow field (MapWindow.riverChains), not
+// from a fresh drainage run on the zoomed terrain -- so every river and lake on the overworld is here,
+// in the same place, and no new ones appear. As the zoom deepens, smaller streams the overworld holds
+// the flow for but leaves off the map (below its river threshold) are drawn too, thinner.
+function paintWindowWater(ctx, canvas, o) {
+  const { win, mesh, palette, seed, riverChains, cols, rows, cellW, cellH, minLoopArea, fillLoopsEvenOdd, smoothLoops } = o;
+  const { sample, world } = win;
+  const zoom = MapWindow.zoomOf(win.window);
+  const factor = Math.max(0.2, 1 / (1 + (zoom - 1) * 0.5));
+  const threshold = world.riverThreshold;
+  const rng = mulberry32(seed + 77113);
+  const margin = 80;
+  ctx.strokeStyle = palette.river;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (const chain of MapWindow.riverChains(world, factor)) {
+    const raw = chain.points.map((p) => { const d = sample.toDetail(p.x, p.y); return { x: d.x, y: d.y, flow: p.flow }; });
+    if (!raw.some((p) => p.x > -margin && p.x < canvas.width + margin && p.y > -margin && p.y < canvas.height + margin)) continue;
+    const pts = refineRiverChain(raw, rng);
+    riverChains.push({ points: pts.map((p) => ({ x: p.x, y: p.y })), maxFlow: chain.maxFlow });
+    for (let i = 1; i < pts.length; i++) {
+      const f = (pts[i - 1].flow + pts[i].flow) / 2;
+      ctx.lineWidth = Math.min(12, (0.9 + 1.2 * Math.sqrt(f / threshold)) * (0.65 + 0.12 * zoom));
+      ctx.globalAlpha = f < threshold ? 0.85 : 1;
+      ctx.beginPath();
+      ctx.moveTo(pts[i - 1].x, pts[i - 1].y);
+      ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+  // Lakes: the overworld's lake cells, smoothed by reading them as a field rather than as blocks.
+  if (sample.lakeAt) {
+    const lakeField = new Float64Array(mesh.cells.length);
+    mesh.cells.forEach((cell, i) => { lakeField[i] = sample.lakeAt(cell.x / canvas.width, cell.y / canvas.height); });
+    fillLoopsEvenOdd(
+      smoothLoops(extractFillableRegions(cols, rows, cellW, cellH, (i) => lakeField[i], 0.5, canvas.width, canvas.height, minLoopArea), 2),
+      palette.lake
+    );
+  }
+}
+
 // The terrain-generation pipeline itself (mesh -> height/erosion/hydrology/
 // moisture -> biome band fills/washes -> coastline/river/lake painting),
 // factored out of renderDetailMap's own generate() so views/map-landmark.js
@@ -188,11 +262,17 @@ function parseGuideParam(params) {
 // caller's own coastline-adjacent drawing, if any, can reuse these rather
 // than re-extracting).
 function renderTerrainPatch(ctx, canvas, opts) {
-  const { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette } = opts;
+  const { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette, win } = opts;
+  // `win` (a window onto a rebuilt overworld, see lib/map-window.js and renderWindowMap below) switches
+  // this to reading the real terrain, climate, rivers and lakes out of that world instead of inventing
+  // them; every `win` branch below leaves the original path untouched when it is absent. The
+  // Vegetation/Ruggedness sliders are the overworld's own, so the window classifies biomes the same way.
+  const forestBias = win ? win.forestBias / 100 : 0;
+  const ruggedBias = win ? win.ruggedBias / 100 : 0;
 
-  const hillsT = Math.max(sea + 0.08, 0.55);
-  const mountainsT = Math.max(hillsT + 0.05, 0.7);
-  const snowT = Math.max(mountainsT + 0.05, 0.85);
+  const hillsT = Math.max(sea + 0.08, 0.55 - ruggedBias);
+  const mountainsT = Math.max(hillsT + 0.05, 0.7 - ruggedBias);
+  const snowT = Math.max(mountainsT + 0.05, 0.85 - ruggedBias);
   const forestT = 0.5;
 
   const meshRng = mulberry32(seed + 71013);
@@ -235,7 +315,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
     ctx.clip('evenodd');
   }
 
-  const mesh = buildTerrainGrid(meshRng, canvas.width, canvas.height, DETAIL_CELL_COUNT);
+  const mesh = buildTerrainGrid(meshRng, canvas.width, canvas.height, win ? win.cellCount : DETAIL_CELL_COUNT);
   const { cols, rows, cellW, cellH } = mesh;
 
   // Height: the same single-range formula as the overworld's Standard
@@ -277,7 +357,8 @@ function renderTerrainPatch(ctx, canvas, opts) {
     // parent-map geography); rawH is demoted from "the whole shape" to a
     // smaller-amplitude perturbation layered on top -- the fine detail
     // that wasn't visible at the parent's coarser resolution.
-    const detailAmp = 0.2; // starting point, tuned visually -- now that the guide grid itself carries real per-cell resolution (64x48), it deserves more say over the fine noise than before
+    // A window's heights ARE the overworld's, so its texture noise is lighter and fades as the zoom deepens.
+    const detailAmp = win ? win.noiseAmp : 0.2; // starting point, tuned visually -- now that the guide grid itself carries real per-cell resolution (64x48), it deserves more say over the fine noise than before
     mesh.cells.forEach((cell, i) => {
       const guideH = sampleGuide(cell.x / canvas.width, cell.y / canvas.height);
       heights[i] = Math.max(0, Math.min(1, guideH + (rawH[i] - meanRaw) * detailAmp));
@@ -288,7 +369,9 @@ function renderTerrainPatch(ctx, canvas, opts) {
   }
 
   fillPits(heights, cols, rows, sea);
-  applyHydraulicErosion(heights, cols, rows, erosionRng, {});
+  // The overworld's heights were already eroded; eroding them again here would move its rivers and
+  // coast, so a window only settles the texture noise with the thermal pass.
+  if (!win) applyHydraulicErosion(heights, cols, rows, erosionRng, {});
   applyThermalErosion(heights, cols, rows, 3, 0.025, 0.5);
   fillPits(heights, cols, rows, sea);
 
@@ -296,24 +379,39 @@ function renderTerrainPatch(ctx, canvas, opts) {
   // exactly (computeHydrology -> riverFlowThreshold -> nearRiver bump ->
   // moisture blend), rivers always on -- this view has no Rivers toggle,
   // consistent with everything else here being locked.
-  const hydro = computeHydrology(mesh.cells, heights, sea);
-  const { flow, downhill, isLake } = hydro;
-  const landCells = [];
-  for (let i = 0; i < mesh.cells.length; i++) if (heights[i] >= sea) landCells.push(i);
-  const riverThreshold = riverFlowThreshold(flow, landCells, 0.04, 3);
+  // A window skips this: its rivers and lakes are the overworld's own (drawn from the world further
+  // down), and its moisture already carries the overworld's river-adjacency bump.
+  let flow = null, downhill = null, isLake = null, riverThreshold = Infinity;
   const nearRiver = new Float64Array(mesh.cells.length);
-  for (let i = 0; i < mesh.cells.length; i++) {
-    if (flow[i] < riverThreshold && !isLake[i]) continue;
-    nearRiver[i] = Math.max(nearRiver[i], 1);
-    for (const nb of mesh.cells[i].neighbors) nearRiver[nb] = Math.max(nearRiver[nb], 0.5);
+  if (!win) {
+    const hydro = computeHydrology(mesh.cells, heights, sea);
+    flow = hydro.flow; downhill = hydro.downhill; isLake = hydro.isLake;
+    const landCells = [];
+    for (let i = 0; i < mesh.cells.length; i++) if (heights[i] >= sea) landCells.push(i);
+    riverThreshold = riverFlowThreshold(flow, landCells, 0.04, 3);
+    for (let i = 0; i < mesh.cells.length; i++) {
+      if (flow[i] < riverThreshold && !isLake[i]) continue;
+      nearRiver[i] = Math.max(nearRiver[i], 1);
+      for (const nb of mesh.cells[i].neighbors) nearRiver[nb] = Math.max(nearRiver[nb], 0.5);
+    }
   }
 
   const moistureSample = makeFbmSampler(moistureRng, Math.max(1, DETAIL_OCTAVES - 1));
   const mOf = new Float64Array(mesh.cells.length);
   const refBiomeOf = new Array(mesh.cells.length);
   mesh.cells.forEach((cell, i) => {
-    let m = moistureSample(cell.x / canvas.width, cell.y / canvas.height) * 0.6 + targetAvgMoisture * 0.4;
-    m = Math.min(1, m + nearRiver[i] * 0.3);
+    let m;
+    let temp = 0.5;
+    if (win) {
+      // The overworld's own moisture and temperature at this spot, plus a little fine variation.
+      const u = cell.x / canvas.width, v = cell.y / canvas.height;
+      m = win.sample.moistureAt(u, v) + (moistureSample(u, v) - 0.5) * 0.06;
+      m = Math.max(0, Math.min(1, m));
+      temp = win.sample.temperatureAt(u, v);
+    } else {
+      m = moistureSample(cell.x / canvas.width, cell.y / canvas.height) * 0.6 + targetAvgMoisture * 0.4;
+      m = Math.min(1, m + nearRiver[i] * 0.3);
+    }
     mOf[i] = m;
     // biomeAt's third argument is temperature (0 coldest .. 1 hottest); this
     // smaller local generator has no temperature field of its own (that
@@ -323,7 +421,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
     // which is temperature-independent. It simply never rolls the newer
     // climate biomes (tundra/taiga/desert/savanna/jungle) -- consistent
     // with this view never having had a climate axis before.
-    refBiomeOf[i] = biomeAt(heights[i], m, 0.5, sea, 0, 0);
+    refBiomeOf[i] = biomeAt(heights[i], m, temp, sea, forestBias, ruggedBias);
   });
 
   // Wild-zone overlay setup, mirroring the overworld's own buildWorld
@@ -332,8 +430,16 @@ function renderTerrainPatch(ctx, canvas, opts) {
   // overrides refBiome itself (a forced snow cap) rather than being a
   // recolor -- applied here, before the render pipeline below, so it
   // naturally treats this patch as snow-covered.
+  //
+  // The original path has the one zone named in the address, applied to the whole patch. A window has
+  // whichever of the overworld's own zones fall inside it, each limited to the cells of the region (or
+  // mountain range) the overworld rolled it for -- `mask` is null for "the whole patch".
+  const zoneEntries = win ? win.sample.zoneEntries(mesh, win.wildZones) : (zone ? [{ zone, mask: null }] : []);
   let wetlowlandOf = null;
-  if (zone && zone.baseBiome === 'wetlowland') {
+  if (win) {
+    wetlowlandOf = new Uint8Array(mesh.cells.length);
+    mesh.cells.forEach((cell, i) => { wetlowlandOf[i] = win.world.wetlowlandOf[win.sample.nearest(cell.x / canvas.width, cell.y / canvas.height)]; });
+  } else if (zone && zone.baseBiome === 'wetlowland') {
     const wetlowlandHillsT = Math.max(sea + 0.08, 0.55);
     const marshMoistureT = 0.62;
     wetlowlandOf = new Uint8Array(mesh.cells.length);
@@ -343,9 +449,12 @@ function renderTerrainPatch(ctx, canvas, opts) {
         (mOf[i] > marshMoistureT || nearRiver[i] > 0) ? 1 : 0;
     }
   }
-  if (zone && zone.forcesSnow) {
+  for (const entry of zoneEntries) {
+    // A window leaves Frostfell alone: on the overworld it only relabels the region's cells, and the
+    // painted terrain there is ordinary, so forcing snow textures here would not match it.
+    if (win || !entry.zone.forcesSnow) continue;
     for (let i = 0; i < mesh.cells.length; i++) {
-      if (heights[i] >= sea) refBiomeOf[i] = 'snow';
+      if ((!entry.mask || entry.mask[i]) && heights[i] >= sea) refBiomeOf[i] = 'snow';
     }
   }
 
@@ -401,6 +510,9 @@ function renderTerrainPatch(ctx, canvas, opts) {
   }
 
   const spacing = Math.max(16, Math.min(canvas.width, canvas.height) / 24);
+  // Biomes painted as a wash with their icons added later: just forest in the original path, which
+  // never has a climate axis; every lowland climate biome in a window, as on the overworld.
+  const washBiomes = win ? OW_LOWLAND_WASH_BIOMES : ['forest'];
   function biomeAtPoint(x, y) {
     const gx = Math.min(cols - 1, Math.max(0, Math.floor(x / cellW)));
     const gy = Math.min(rows - 1, Math.max(0, Math.floor(y / cellH)));
@@ -411,21 +523,38 @@ function renderTerrainPatch(ctx, canvas, opts) {
       const px = sx + (textureRng() - 0.5) * spacing * 0.6;
       const py = sy + (textureRng() - 0.5) * spacing * 0.6;
       const b = biomeAtPoint(px, py);
-      if (b === 'hills' || b === 'mountains' || b === 'forest') continue;
+      if (b === 'hills' || b === 'mountains' || washBiomes.includes(b)) continue;
       if (b !== 'deepwater' && b !== 'shallowwater' && !isGroundAt(px, py)) continue;
       paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes);
     }
   }
 
-  const landForestAt = (i) => (heights[i] >= sea + 0.03 ? mOf[i] : -1);
-  const forestLoops = extractFillableRegions(cols, rows, cellW, cellH, landForestAt, forestT, canvas.width, canvas.height, minLoopArea);
-  if (forestLoops.length > 0) {
-    ctx.save();
-    clipToLoops(landLoops.length ? landLoops : beachLoops);
-    for (const group of groupChainsIntoLoops(forestLoops)) {
-      paintWatercolorWash(ctx, group, washRng, palette.wash.forest, palette.ink, 28);
+  if (win) {
+    // One wash per lowland biome present, masked straight from the biome classification -- the same
+    // pass the overworld paints, so a desert or a jungle on the overworld is one here too.
+    const present = new Set(refBiomeOf);
+    for (const b of OW_LOWLAND_WASH_BIOMES) {
+      if (!present.has(b)) continue;
+      const loops = extractFillableRegions(cols, rows, cellW, cellH, (i) => (refBiomeOf[i] === b ? 1 : 0), 0.5, canvas.width, canvas.height, minLoopArea);
+      if (loops.length === 0) continue;
+      ctx.save();
+      clipToLoops(landLoops.length ? landLoops : beachLoops);
+      for (const group of groupChainsIntoLoops(loops)) {
+        paintWatercolorWash(ctx, group, washRng, palette.wash[b], palette.ink, 28);
+      }
+      ctx.restore();
     }
-    ctx.restore();
+  } else {
+    const landForestAt = (i) => (heights[i] >= sea + 0.03 ? mOf[i] : -1);
+    const forestLoops = extractFillableRegions(cols, rows, cellW, cellH, landForestAt, forestT, canvas.width, canvas.height, minLoopArea);
+    if (forestLoops.length > 0) {
+      ctx.save();
+      clipToLoops(landLoops.length ? landLoops : beachLoops);
+      for (const group of groupChainsIntoLoops(forestLoops)) {
+        paintWatercolorWash(ctx, group, washRng, palette.wash.forest, palette.ink, 28);
+      }
+      ctx.restore();
+    }
   }
 
   const highlandLoops = extractFillableRegions(cols, rows, cellW, cellH, heightAt, hillsT, canvas.width, canvas.height, minLoopArea);
@@ -442,7 +571,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
       if (!isGroundAt(px, py)) continue;
       if (b === 'hills' || b === 'mountains') {
         paintRosetteTexture(ctx, px, py, spacing, spacing, rosetteRng, palette.ink, b === 'mountains');
-      } else if (b === 'forest') {
+      } else if (washBiomes.includes(b)) {
         paintBiomeTexture(ctx, b, px, py, spacing, spacing, textureRng, palette.ink, palette.biomes);
       }
     }
@@ -457,8 +586,11 @@ function renderTerrainPatch(ctx, canvas, opts) {
   // appliesTo instead) recolor an elevation band. Frostfell has no wash
   // of its own -- it already painted as ordinary snow above via the
   // forced refBiome override, so it's excluded here.
-  if (zone && !zone.forcesSnow) {
-    const zoneAt = zone.baseBiome
+  for (const entry of zoneEntries) {
+    const zone = entry.zone;
+    if (zone.forcesSnow) continue;
+    const zoneMask = entry.mask;
+    const zoneAtRaw = zone.baseBiome
       ? (i) => {
           if (zone.baseBiome === 'wetlowland') return wetlowlandOf[i] ? 1 : 0;
           if (zone.baseBiome === 'any') return heights[i] >= sea ? 1 : 0;
@@ -469,6 +601,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
           if (zone.appliesTo === 'rangeBase') return (heights[i] >= hillsT && heights[i] < mountainsT) ? 1 : 0;
           return heights[i] >= hillsT ? 1 : 0; // 'range'
         };
+    const zoneAt = zoneMask ? (i) => (zoneMask[i] ? zoneAtRaw(i) : 0) : zoneAtRaw;
     function scatterZoneIcons() {
       for (let sy = spacing / 2; sy < canvas.height; sy += spacing) {
         for (let sx = spacing / 2; sx < canvas.width; sx += spacing) {
@@ -533,15 +666,6 @@ function renderTerrainPatch(ctx, canvas, opts) {
     ctx.stroke();
   }
 
-  const n = mesh.cells.length;
-  const hasUpstream = new Uint8Array(n);
-  for (let i = 0; i < n; i++) {
-    if (flow[i] >= riverThreshold && downhill[i] !== -1) hasUpstream[downhill[i]] = 1;
-  }
-  const visitedDown = new Uint8Array(n);
-  ctx.strokeStyle = palette.river;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
   // Collected (not just stroked-and-discarded) so a caller -- currently
   // only views/map-settlement.js's river-through-town feature -- can clip
   // these same chains against its own town boundary and re-render the
@@ -549,40 +673,57 @@ function renderTerrainPatch(ctx, canvas, opts) {
   // ignoring it or letting the settlement's opaque ground re-fill pave
   // over it.
   const riverChains = [];
-  for (let s = 0; s < n; s++) {
-    if (flow[s] < riverThreshold || hasUpstream[s]) continue;
-    const chain = [{ x: mesh.cells[s].x, y: mesh.cells[s].y }];
-    let maxFlow = flow[s];
-    let cur = s;
-    for (;;) {
-      const next = downhill[cur];
-      if (next === -1) break;
-      chain.push({ x: mesh.cells[next].x, y: mesh.cells[next].y });
-      maxFlow = Math.max(maxFlow, flow[next]);
-      if (visitedDown[next]) break;
-      visitedDown[next] = 1;
-      if (heights[next] < sea || flow[next] < riverThreshold) break;
-      cur = next;
+  if (win) {
+    paintWindowWater(ctx, canvas, { win, mesh, sea, palette, seed, riverChains, cols, rows, cellW, cellH, minLoopArea, fillLoopsEvenOdd, smoothLoops });
+  } else {
+    const n = mesh.cells.length;
+    const hasUpstream = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      if (flow[i] >= riverThreshold && downhill[i] !== -1) hasUpstream[downhill[i]] = 1;
     }
-    if (chain.length < 2) continue;
-    const smoothed = chaikinSmooth(chain, 2);
-    riverChains.push({ points: smoothed, maxFlow });
-    ctx.lineWidth = Math.min(6, 1 + Math.sqrt(maxFlow / riverThreshold));
-    ctx.beginPath();
-    ctx.moveTo(smoothed[0].x, smoothed[0].y);
-    for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
-    ctx.stroke();
+    const visitedDown = new Uint8Array(n);
+    ctx.strokeStyle = palette.river;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (let s = 0; s < n; s++) {
+      if (flow[s] < riverThreshold || hasUpstream[s]) continue;
+      const chain = [{ x: mesh.cells[s].x, y: mesh.cells[s].y }];
+      let maxFlow = flow[s];
+      let cur = s;
+      for (;;) {
+        const next = downhill[cur];
+        if (next === -1) break;
+        chain.push({ x: mesh.cells[next].x, y: mesh.cells[next].y });
+        maxFlow = Math.max(maxFlow, flow[next]);
+        if (visitedDown[next]) break;
+        visitedDown[next] = 1;
+        if (heights[next] < sea || flow[next] < riverThreshold) break;
+        cur = next;
+      }
+      if (chain.length < 2) continue;
+      const smoothed = chaikinSmooth(chain, 2);
+      riverChains.push({ points: smoothed, maxFlow });
+      ctx.lineWidth = Math.min(6, 1 + Math.sqrt(maxFlow / riverThreshold));
+      ctx.beginPath();
+      ctx.moveTo(smoothed[0].x, smoothed[0].y);
+      for (let i = 1; i < smoothed.length; i++) ctx.lineTo(smoothed[i].x, smoothed[i].y);
+      ctx.stroke();
+    }
+    const lakeVal = (i) => (isLake[i] && flow[i] >= 2 ? 1 : 0);
+    fillLoopsEvenOdd(
+      extractFillableRegions(cols, rows, cellW, cellH, lakeVal, 0.5, canvas.width, canvas.height, minLoopArea),
+      palette.lake
+    );
   }
-  const lakeVal = (i) => (isLake[i] && flow[i] >= 2 ? 1 : 0);
-  fillLoopsEvenOdd(
-    extractFillableRegions(cols, rows, cellW, cellH, lakeVal, 0.5, canvas.width, canvas.height, minLoopArea),
-    palette.lake
-  );
 
   return { mesh, cols, rows, cellW, cellH, heights, mOf, refBiomeOf, flow, downhill, isLake, riverThreshold, hillsT, mountainsT, snowT, beachLoops, landLoops, wetlowlandOf, isGroundAt, riverChains };
 }
 
 function renderDetailMap(container, params) {
+  // An address with a window (lib/map-window.js) is a zoom into a rebuilt overworld, not a click
+  // on one: see views/map-window.js.
+  const zoomWindow = MapWindow.parse(params);
+  if (zoomWindow) { renderWindowMap(container, params, zoomWindow); return; }
   const overworldSeed = parseInt(params.get('seed'), 10) || 1;
   const clickX = parseFloat(params.get('x')) || 0;
   const clickY = parseFloat(params.get('y')) || 0;

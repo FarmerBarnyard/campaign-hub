@@ -1178,7 +1178,8 @@ function renderOverworldMap(container) {
     // for the wrong canvas. wildZonesOn joins it for the same reason the other checkboxes already do.
     const key = [seed, cellCount, octaves, island, seaLevel, riversOn, settleCount, wildZonesOn, canvas.width, canvas.height].join('|');
     if (worldCache && worldCache.key === key) return worldCache;
-    worldCache = buildOverworldWorld({ seed, cellCount, octaves, island, seaLevel, riversOn, settleCount }, canvas.width, canvas.height);
+    // Through the shared one-world cache so a zoom into this map (views/map-detail.js) reuses it.
+    worldCache = cachedOverworldWorld({ seed, cellCount, octaves, island, seaLevel, riversOn, settleCount }, canvas.width, canvas.height);
     worldCache.key = key;
     return worldCache;
   }

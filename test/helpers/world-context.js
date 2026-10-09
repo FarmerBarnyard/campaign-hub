@@ -13,8 +13,8 @@ var FILES = [
   "lib/tree-clusters.js", "lib/hachure-terrain.js", "lib/map-labels.js", "lib/keyed-legend.js",
   "lib/map-themes.js", "lib/settlement-names.js", "lib/map-biome-zones.js", "lib/campaign-themes.js",
   "lib/zip-writer.js", "lib/room-shapes.js", "lib/landmark-sites.js", "lib/landmark-lore.js",
-  "lib/dungeon-lore.js", "lib/dungeon-props.js", "lib/settlement-poi.js", "lib/overworld-world.js",
-  "views/map-dungeon.js", "views/map-overworld.js", "views/map-settlement.js", "views/map-detail.js",
+  "lib/dungeon-lore.js", "lib/dungeon-props.js", "lib/settlement-poi.js", "lib/overworld-world.js", "lib/map-window.js",
+  "views/map-dungeon.js", "views/map-overworld.js", "views/map-settlement.js", "views/map-detail.js", "views/map-window.js",
   "views/map-landmark.js",
 ];
 
