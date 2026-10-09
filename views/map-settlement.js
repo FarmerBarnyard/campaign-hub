@@ -1657,9 +1657,12 @@ function renderSettlementMap(container, params) {
         candidates.push({ cell, angleFromCenter: info.angleFromCenter });
       }
       if (candidates.length === 0) continue;
-      let pool = candidates;
+      // RULES.md B4 counts the landmark buildings too, and the largest cells (which the pick below favours)
+      // tend to be the interior of a block. So start from the candidates beside a street when there are any.
+      const beside = candidates.filter((c) => distToAnyStreet(c.cell.x, c.cell.y) <= Math.sqrt(cellArea(c.cell)) * 0.6 + 4);
+      let pool = beside.length ? beside : candidates;
       if (poiType.coastalOnly && shoreLimit) {
-        const waterFacing = candidates.filter((c) => waterFacingScore(c.angleFromCenter) < 0.9);
+        const waterFacing = pool.filter((c) => waterFacingScore(c.angleFromCenter) < 0.9);
         if (waterFacing.length) pool = waterFacing;
       }
       const cells = pool.map((c) => c.cell);
@@ -1689,13 +1692,28 @@ function renderSettlementMap(container, params) {
     // re-derived via projectPolyAtAngle (not minAreaRect) before
     // fitRectToPolygon, since that anti-overlap area-ratio check is only
     // valid against the SAME angle the final rect is actually drawn at.
-    function placeOrdinaryBuilding(cell, shrink, baseColor) {
+    // Split in two so a building can be judged BEFORE it is drawn: the plan is the rectangle and size it
+    // will have, and RULES.md B4 is a statement about exactly that (the building's own centre and size
+    // against the nearest street). Judging the cell's centre and the cell's size instead, as this used to,
+    // let through buildings that were shrunk well below their cell and so sat too far back to count.
+    function planOrdinaryBuilding(cell, shrink) {
       const targetAngle = nearestRoadAngle(cell.x, cell.y, buildingRng);
       const rect = fitRectToPolygon(projectPolyAtAngle(cell.polygon, targetAngle), cell.polygon);
       const maxDim = R * 0.3;
       let w = Math.max(4, rect.w * shrink), h = Math.max(4, rect.h * shrink);
       if (maxDim) { w = Math.min(w, maxDim); h = Math.min(h, maxDim); }
-      drawPictorialBuilding(ctx, rect, w, h, { baseColor, ink: palette.ink, rng: buildingRng });
+      return { cell, rect, w, h };
+    }
+    // The audit's reach (0.75 x the longest side + 6) with a little margin, so a plan that passes here
+    // also passes there.
+    function plannedFrontsStreet(plan) {
+      return distToAnyStreet(plan.rect.cx, plan.rect.cy) <= Math.max(plan.w, plan.h) * 0.7 + 5;
+    }
+    function drawPlanned(plan, baseColor) {
+      drawPictorialBuilding(ctx, plan.rect, plan.w, plan.h, { baseColor, ink: palette.ink, rng: buildingRng });
+    }
+    function placeOrdinaryBuilding(cell, shrink, baseColor) {
+      drawPlanned(planOrdinaryBuilding(cell, shrink), baseColor);
     }
 
     if (tierKey === 'village') {
@@ -1709,10 +1727,14 @@ function renderSettlementMap(container, params) {
       // everything else stays bare ground. Its own dedicated stream so
       // reseeding the cluster layout never perturbs any other concern.
       const clusterRng = mulberry32(seed + 121212);
-      const clusterPool = mesh.cells.filter((c) => !claimedCellIdx.has(c.index) && eligibleForPlot(c));
+      let clusterPool = mesh.cells.filter((c) => !claimedCellIdx.has(c.index) && eligibleForPlot(c));
+      // RULES.md B4: a village's cottages sit along its lanes too. Start the clusters beside a street when there
+      // are enough such cells to pick from (otherwise the whole pool, so a village is never left empty).
+      const besideStreet = clusterPool.filter((c) => distToAnyStreet(c.x, c.y) <= Math.sqrt(cellArea(c)) * 0.75 + 6);
       const seedCells = [];
       const minSeedDist = R * 0.22;
       const seedTarget = 8 + Math.floor(clusterRng() * 7); // 8-14
+      if (besideStreet.length >= seedTarget * 2) clusterPool = besideStreet;
       for (let tries = 0; tries < clusterPool.length * 3 && seedCells.length < seedTarget && clusterPool.length; tries++) {
         const idx = Math.floor(clusterRng() * clusterPool.length);
         const candidate = clusterPool[idx];
@@ -1721,20 +1743,38 @@ function renderSettlementMap(container, params) {
         if (!tooClose) seedCells.push(candidate);
       }
       const cottageShrink = () => VILLAGE_COTTAGE_SHRINK[0] + clusterRng() * (VILLAGE_COTTAGE_SHRINK[1] - VILLAGE_COTTAGE_SHRINK[0]);
+      // A cluster's first cottage is judged like every other (B4): one that would sit back from the lane is
+      // set aside and only used if the village would otherwise fall below its floor of buildings.
+      const setAside = [];
+      let villagePlaced = 0;
       for (const seedCell of seedCells) {
         if (claimedCellIdx.has(seedCell.index)) continue;
+        const seedPlan = planOrdinaryBuilding(seedCell, cottageShrink());
+        if (!plannedFrontsStreet(seedPlan)) { setAside.push(seedPlan); continue; }
         claimedCellIdx.add(seedCell.index);
-        placeOrdinaryBuilding(seedCell, cottageShrink(), palette.buildingPoor);
+        drawPlanned(seedPlan, palette.buildingPoor);
+        villagePlaced++;
         const claimCount = 1 + Math.floor(clusterRng() * 5);
         let claimed = 0;
         for (const nbrIdx of seedCell.neighbors) {
           if (claimed >= claimCount) break;
           const nbr = mesh.cells[nbrIdx];
           if (!nbr || claimedCellIdx.has(nbr.index) || !eligibleForPlot(nbr)) continue;
+          // a neighbour is only taken if the cottage really would front a street (B4)
+          const plan = planOrdinaryBuilding(nbr, cottageShrink());
+          if (!plannedFrontsStreet(plan)) continue;
           claimedCellIdx.add(nbr.index);
-          placeOrdinaryBuilding(nbr, cottageShrink(), palette.buildingPoor);
+          drawPlanned(plan, palette.buildingPoor);
           claimed++;
+          villagePlaced++;
         }
+      }
+      for (const plan of setAside) {
+        if (villagePlaced >= (config.minBuildings || 0)) break;
+        if (claimedCellIdx.has(plan.cell.index)) continue;
+        claimedCellIdx.add(plan.cell.index);
+        drawPlanned(plan, palette.buildingPoor);
+        villagePlaced++;
       }
     } else {
       // Town/city: tiered variety (hovel/house/manor) instead of one flat
@@ -1762,22 +1802,15 @@ function renderSettlementMap(container, params) {
       // kept in reserve, sorted nearest-first, and admitted only if the
       // frontage cells alone don't reach the tier's minimum. Density is
       // preserved by construction and cannot regress into that failure again.
+      // Each candidate is planned first (tier, shrink and rectangle decided, nothing drawn) and judged as
+      // the building it would be: its own centre and size against the nearest street, the audit's own test.
+      // Judging the cell instead (its centre, its size) admitted buildings shrunk well below their cell that
+      // then sat too far back; that is why only about three maps in four reached the bar.
       const frontage = [], backland = [];
       for (const cell of mesh.cells) {
         if (claimedCellIdx.has(cell.index)) continue;
         const info = eligibleForPlot(cell);
         if (!info) continue;
-        const d = distToAnyStreet(cell.x, cell.y);
-        const reach = Math.sqrt(cellArea(cell)) * 0.75 + 6;
-        (d <= reach ? frontage : backland).push({ cell, info, d });
-      }
-      backland.sort((a, b) => a.d - b.d);
-      const minBuildings = Math.max(0, (config.minBuildings || 0) - poiPlaced.length);
-      const chosenCells = frontage.concat(
-        frontage.length >= minBuildings ? [] : backland.slice(0, minBuildings - frontage.length)
-      );
-
-      for (const { cell, info } of chosenCells) {
         const distFrac = info.frac;
 
         const weights = buildingTiers.map((t) => t.weight);
@@ -1793,8 +1826,16 @@ function renderSettlementMap(container, params) {
         }
         const [minS, maxS] = tier.shrink;
         const shrink = minS + buildingRng() * (maxS - minS);
-        placeOrdinaryBuilding(cell, shrink, lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac));
+        const plan = planOrdinaryBuilding(cell, shrink);
+        const entry = { plan, color: lerpBuildingColor(palette.buildingRich, palette.buildingPoor, distFrac), d: distToAnyStreet(plan.rect.cx, plan.rect.cy) };
+        (plannedFrontsStreet(plan) ? frontage : backland).push(entry);
       }
+      backland.sort((a, b) => a.d - b.d);
+      const minBuildings = Math.max(0, (config.minBuildings || 0) - poiPlaced.length);
+      const chosen = frontage.concat(
+        frontage.length >= minBuildings ? [] : backland.slice(0, minBuildings - frontage.length)
+      );
+      for (const { plan, color } of chosen) drawPlanned(plan, color);
     }
 
     // POI footprints, drawn after ordinary buildings so they read as
