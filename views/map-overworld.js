@@ -2086,8 +2086,11 @@ function renderOverworldMap(container, params) {
     const { cols, rows, cellW, cellH, regionOf, regionCategory } = worldCache;
     const gx = Math.min(cols - 1, Math.max(0, Math.floor(s.x / cellW)));
     const gy = Math.min(rows - 1, Math.max(0, Math.floor(s.y / cellH)));
+    // The town map is a SQUARE canvas, so the terrain window has to be square in overworld pixels too: the
+    // overworld canvas is 4:3, and a 4:3 window painted onto a square stretched the land a third taller than
+    // the overworld shows it (a diagonal island came out too steep).
     const windowCellsX = (canvas.width / SETTLEMENT_ZOOM_FACTOR) / cellW;
-    const windowCellsY = (canvas.height / SETTLEMENT_ZOOM_FACTOR) / cellH;
+    const windowCellsY = (canvas.width / SETTLEMENT_ZOOM_FACTOR) / cellH;
     const coastal = regionCategory[regionOf[s.index]] === 'coastal' ? 1 : 0;
     return `#/map/settlement?seed=${currentSeed}&idx=${i}&name=${encodeURIComponent(s.name)}&tier=${s.tier}` +
       buildGuideParams(s.x, s.y, gx, gy, windowCellsX, windowCellsY) +

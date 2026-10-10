@@ -187,7 +187,7 @@ function renderLandmarkMap(container, params) {
     const siteRng = mulberry32(seed + 337799);
     const loreRng = mulberry32(seed + 445566);
 
-    renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette });
+    renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette, faithful: true });
 
     // Inset panel: the site is the dominant subject, terrain is backdrop --
     // a framed parchment card roughly centered on the canvas, in the same

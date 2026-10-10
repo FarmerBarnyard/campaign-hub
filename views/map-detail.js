@@ -263,6 +263,11 @@ function paintWindowWater(ctx, canvas, o) {
 // than re-extracting).
 function renderTerrainPatch(ctx, canvas, opts) {
   const { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette, win } = opts;
+  // A map drawn from the overworld's own height grid (a click-through, not a free-standing patch) has to keep
+  // that grid's coast: a narrow neck of land a few cells wide is a real feature of the overworld, and extra
+  // noise or another round of hydraulic erosion drowns it, so the town ends up on a strait. `faithful` keeps
+  // the guide's shape and adds only a light texture, the way a window does.
+  const faithful = !!win || (!!opts.faithful && !!sampleGuide);
   // `win` (a window onto a rebuilt overworld, see lib/map-window.js and renderWindowMap below) switches
   // this to reading the real terrain, climate, rivers and lakes out of that world instead of inventing
   // them; every `win` branch below leaves the original path untouched when it is absent. The
@@ -358,7 +363,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
     // smaller-amplitude perturbation layered on top -- the fine detail
     // that wasn't visible at the parent's coarser resolution.
     // A window's heights ARE the overworld's, so its texture noise is lighter and fades as the zoom deepens.
-    const detailAmp = win ? win.noiseAmp : 0.2; // starting point, tuned visually -- now that the guide grid itself carries real per-cell resolution (64x48), it deserves more say over the fine noise than before
+    const detailAmp = win ? win.noiseAmp : (faithful ? 0.1 : 0.2); // starting point, tuned visually -- now that the guide grid itself carries real per-cell resolution (64x48), it deserves more say over the fine noise than before
     mesh.cells.forEach((cell, i) => {
       const guideH = sampleGuide(cell.x / canvas.width, cell.y / canvas.height);
       heights[i] = Math.max(0, Math.min(1, guideH + (rawH[i] - meanRaw) * detailAmp));
@@ -371,7 +376,7 @@ function renderTerrainPatch(ctx, canvas, opts) {
   fillPits(heights, cols, rows, sea);
   // The overworld's heights were already eroded; eroding them again here would move its rivers and
   // coast, so a window only settles the texture noise with the thermal pass.
-  if (!win) applyHydraulicErosion(heights, cols, rows, erosionRng, {});
+  if (!faithful) applyHydraulicErosion(heights, cols, rows, erosionRng, {});
   applyThermalErosion(heights, cols, rows, 3, 0.025, 0.5);
   fillPits(heights, cols, rows, sea);
 
@@ -789,7 +794,7 @@ function renderDetailMap(container, params) {
     const grainRng = mulberry32(seed + 14683);
     const borderRng = mulberry32(seed + 25791);
 
-    const terrain = renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette });
+    const terrain = renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone, palette, faithful: true });
     const { cols, rows, cellW, cellH, heights, refBiomeOf, hillsT, mountainsT, snowT } = terrain;
 
     // Landmark: one candidate biased toward the canvas center, excluded

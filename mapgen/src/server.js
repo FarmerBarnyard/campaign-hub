@@ -24,7 +24,7 @@ const PORT = parseInt(process.env.MAPGEN_PORT, 10) || 8791;
 // Bumped whenever the art changes. It is part of the Worker's cache key, so
 // bumping it is what retires every cached map at once -- without it, an art
 // fix would be invisible to anyone whose map was already generated.
-const GENERATOR_VERSION = '2';
+const GENERATOR_VERSION = '3';
 
 const TYPES = new Set(['settlement', 'dungeon', 'detail', 'landmark', 'overworld']);
 // Only these reach the generators. An allow-list rather than a block-list:
