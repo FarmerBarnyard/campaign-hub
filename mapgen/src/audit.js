@@ -15,7 +15,7 @@ const { evaluateSettlement, ENFORCED_RULE_IDS } = require('./rules');
 const OUT_DIR = path.resolve(__dirname, '..', 'out');
 
 function parseArgs(argv) {
-  const args = { type: 'settlement', seeds: 25, tier: null, sheet: false, scale: 1 };
+  const args = { type: 'settlement', seeds: 25, tier: null, sheet: false, scale: 1, guide: false };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--type') args.type = argv[++i];
@@ -23,11 +23,29 @@ function parseArgs(argv) {
     else if (a === '--tier') args.tier = argv[++i];
     else if (a === '--scale') args.scale = parseFloat(argv[++i]);
     else if (a === '--sheet') args.sheet = true;
+    else if (a === '--guide') args.guide = true;
   }
   return args;
 }
 
 const TIERS = ['village', 'town', 'city'];
+
+// A terrain backdrop like the one an overworld click threads through (64x48 height grid): a coastal landmass whose
+// size, orientation and ruggedness vary with the seed, so a "--guide" audit covers the terrain-backed path the live
+// app uses, not just the flat-ground fallback.
+function syntheticGuide(seed) {
+  const gw = 64, gh = 48, bytes = Buffer.alloc(gw * gh);
+  const r = (k) => { const x = Math.sin(seed * 12.9898 + k * 78.233) * 43758.5453; return x - Math.floor(x); };
+  const rx = 0.35 + r(1) * 0.3, ry = 0.4 + r(2) * 0.4, rot = r(3) * Math.PI, ph = r(4) * 6, wob = 0.1 + r(5) * 0.2;
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
+    const u = x / gw - 0.5, v = y / gh - 0.5;
+    const ur = u * Math.cos(rot) + v * Math.sin(rot), vr = -u * Math.sin(rot) + v * Math.cos(rot);
+    let d = Math.hypot(ur / rx, vr / ry);
+    d += wob * Math.sin(u * 9 + ph) + wob * 0.7 * Math.sin(v * 13 - ph);
+    bytes[y * gw + x] = Math.max(0, Math.min(255, Math.round((0.78 - d * 0.42) * 255)));
+  }
+  return { guide: bytes.toString('base64'), gw: String(gw), gh: String(gh) };
+}
 
 async function main() {
   const args = parseArgs(process.argv);
@@ -54,7 +72,8 @@ async function main() {
       rendered = await renderMap({
         type: args.type,
         scale: args.scale,
-        params: { seed: String(seed), idx: '0', name: `Audit${seed}`, tier },
+        params: Object.assign({ seed: String(seed), idx: '0', name: `Audit${seed}`, tier },
+          args.guide ? Object.assign({ x: '400', y: '300', coastal: '1', h: '0.5', m: '0.5', sea: '0.42' }, syntheticGuide(seed)) : {}),
       });
     } catch (err) {
       failures.push({ seed, tier, rule: 'RENDER', detail: err.message });

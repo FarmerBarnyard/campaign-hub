@@ -1037,7 +1037,7 @@ function renderSettlementMap(container, params) {
     progress.update(0.3, 'Painting terrain…');
     let terrainResult = null;
     if (sampleGuide) {
-      terrainResult = renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone: null, palette: theme.overworld });
+      terrainResult = renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone: null, palette: theme.overworld, faithful: true });
     } else {
       ctx.fillStyle = palette.ground;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1269,37 +1269,6 @@ function renderSettlementMap(container, params) {
       }
     }
 
-    // The settlement's own ground tone, matched to the biome it actually
-    // sits in rather than one fixed tan for every town everywhere. The
-    // flat palette.ground alone made a forest town and a barrens town
-    // render identical pale discs regardless of the countryside around
-    // them; blending it toward the DOMINANT land biome under this town's
-    // own footprint (the same refBiomeOf grid renderTerrainPatch already
-    // classified) keeps a forest town reading green-ish and a barrens
-    // town dusty, so the interior belongs to its surroundings instead of
-    // being a swatch dropped on top of them. Water cells are excluded
-    // from the vote -- a coastal town is still a LAND settlement, and
-    // letting deepwater win the count would tint the whole town blue.
-    let townGroundTone = palette.ground;
-    if (terrainResult) {
-      const biomeVotes = {};
-      const { cols: tCols, rows: tRows, cellW: tCellW, cellH: tCellH, refBiomeOf } = terrainResult;
-      for (let gy = 0; gy < tRows; gy++) {
-        for (let gx = 0; gx < tCols; gx++) {
-          const px = (gx + 0.5) * tCellW, py = (gy + 0.5) * tCellH;
-          const ddx = px - cx, ddy = py - cy;
-          if (Math.hypot(ddx, ddy) > effectiveR(Math.atan2(ddy, ddx))) continue;
-          const b = refBiomeOf[gy * tCols + gx];
-          if (b === 'deepwater' || b === 'shallowwater') continue;
-          biomeVotes[b] = (biomeVotes[b] || 0) + 1;
-        }
-      }
-      let dominantBiome = null, bestVote = 0;
-      for (const b in biomeVotes) if (biomeVotes[b] > bestVote) { bestVote = biomeVotes[b]; dominantBiome = b; }
-      const biomeColor = dominantBiome && theme.overworld.biomes[dominantBiome];
-      if (biomeColor) townGroundTone = lerpBuildingColor(palette.ground, biomeColor, 0.45);
-    }
-
     // Everything from here through the plaza is clipped to the wobbled
     // boundary when a backdrop was painted -- this is what makes the town
     // read as literally cut into the terrain rather than floating over a
@@ -1320,21 +1289,10 @@ function renderSettlementMap(container, params) {
       // streets, buildings -- inherits this clip, so none of them can
       // land on water either.
       clipToRealLand();
-      // A tint, not an opaque overwrite: a full-alpha fill here was
-      // erasing the real terrain colors/texture renderTerrainPatch just
-      // painted, replacing the whole town interior with one flat color --
-      // called out directly as "the abrupt change to city/town," and
-      // confirmed visually: a stark seam right at the wall between richly
-      // varied countryside outside and a flat tan disc inside, with no
-      // real reference map doing anything like it (a town is built ON its
-      // terrain, not a differently-colored patch cut into it). Partial
-      // alpha keeps the real ground's own color/hachure texture reading
-      // through, softened toward the biome-matched tone above -- a
-      // "cleared, settled" look instead of a hard material swap.
-      ctx.fillStyle = townGroundTone;
-      ctx.globalAlpha = 0.78;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.globalAlpha = 1;
+      // No ground fill here: the town is built ON the terrain renderTerrainPatch just painted, so its interior is
+      // that terrain's own biome colour and texture (forest stays forest, barrens stay barrens). It used to be
+      // overwritten with a tan tint and a ring of dark hatching, which read as a straw-coloured disc that matched
+      // nothing around it.
     }
 
     // River through the settlement: renderTerrainPatch's own river chains
@@ -1409,6 +1367,7 @@ function renderSettlementMap(container, params) {
     ctx.save();
     pathFromBoundary();
     ctx.clip();
+    if (!sampleGuide) {
     // The radial term alone produced perfectly concentric rings around
     // the hub, which reads as machined rather than drawn; the noise term
     // bends those contours so they wander like real ground does.
@@ -1416,6 +1375,7 @@ function renderSettlementMap(container, params) {
     paintHachureField(ctx, canvas.width, canvas.height, hachureRng, palette.ink,
       (x, y) => -Math.hypot(x - hubX, y - hubY) + groundWarp(x / canvas.width * 2.5, y / canvas.height * 2.5) * R * 0.6,
       null, { spacing: 4, strokeLen: 5 });
+    }
     ctx.restore();
 
     // Street network: spokes radiating from the hub (uneven length),
