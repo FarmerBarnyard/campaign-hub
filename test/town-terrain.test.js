@@ -41,4 +41,17 @@ test("inside a terrain-backed town the ground is the terrain's own, not a tan fi
   assert.ok(/if \(!sampleGuide\) \{\s*const groundWarp|if \(!sampleGuide\) \{/.test(s), "the radial straw hatching only runs without a backdrop");
 });
 
+test("a town link carries the world's own settings, and the town page reads the real world from them", function () {
+  var ow = read("views/map-overworld.js");
+  assert.ok(ow.indexOf("MapWindow.worldAddress(lastSettings)") !== -1, "the overworld adds the world address to a town link");
+  var st = read("views/map-settlement.js");
+  assert.ok(st.indexOf("cachedOverworldWorld(MapWindow.worldParams(addr)") !== -1, "the town rebuilds the world (shared cache)");
+  assert.ok(st.indexOf("MapWindow.sampler(world, addr, { width: canvas.width, height: canvas.height })") !== -1, "with a window square on its own canvas");
+  assert.ok(st.indexOf("win: worldWin ? worldWin.win : undefined") !== -1, "and paints it through the window path");
+  assert.ok(st.indexOf("lakeAt(u, v) >= 0.5") !== -1, "lakes count as water for streets and houses");
+  ["'oc'", "'oo'", "'oi'", "'orv'", "'os'", "'ofb'", "'orb'", "'owz'", "'osc'"].forEach(function (k) {
+    assert.ok(st.indexOf(k) !== -1, k + " is sent to the render service");
+  });
+});
+
 console.log(passed + " passed");

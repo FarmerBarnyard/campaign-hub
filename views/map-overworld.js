@@ -2092,9 +2092,12 @@ function renderOverworldMap(container, params) {
     const windowCellsX = (canvas.width / SETTLEMENT_ZOOM_FACTOR) / cellW;
     const windowCellsY = (canvas.width / SETTLEMENT_ZOOM_FACTOR) / cellH;
     const coastal = regionCategory[regionOf[s.index]] === 'coastal' ? 1 : 0;
+    // The world's own settings travel too, so the town map can rebuild this overworld and read its real coast,
+    // lakes, rivers and biomes (the height guide below is the fallback for a build that cannot).
+    const worldPart = lastSettings ? '&' + MapWindow.worldAddress(lastSettings) : '';
     return `#/map/settlement?seed=${currentSeed}&idx=${i}&name=${encodeURIComponent(s.name)}&tier=${s.tier}` +
       buildGuideParams(s.x, s.y, gx, gy, windowCellsX, windowCellsY) +
-      `&coastal=${coastal}`;
+      `&coastal=${coastal}` + worldPart;
   }
   canvas.addEventListener('mousemove', (evt) => {
     canvas.style.cursor = (hitTestSettlement(evt) || hitTestLandmark(evt) || hitTestLand(evt)) ? 'pointer' : 'default';
