@@ -45,6 +45,10 @@ const LIB_FILES = [
   'lib/settlement-poi.js',
   'lib/overworld-world.js',
   'lib/map-window.js',
+  // The map views build their "Render on server" checkbox and call ServerMap.attach while they set up, so it
+  // has to exist here; against the container stubs both are inert, and nothing in it reaches the network
+  // unless a checkbox is ticked.
+  'lib/server-map.js',
 ];
 
 // map-dungeon.js is required by the others: it defines the shared

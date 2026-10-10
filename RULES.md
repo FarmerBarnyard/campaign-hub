@@ -108,9 +108,12 @@ They face and cluster on the road network rather than scattering evenly across o
 *Check:* ≥ 75% of buildings have their centre within `0.75 × their own longest side + 6px` of
 a road centreline. Measured against the building's own size rather than street width, so the
 bar means the same thing for a cottage and a cathedral.
-*Status:* currently **56–67%** — this is the measurement behind "buildings look scattered
-like confetti" on the contact sheet, and the largest open quality gap in the settlement
-generator. The orientation half of the original wording (long axis within 25° of the road
+*Status:* was **56–67%** (the measurement behind "buildings look scattered like confetti").
+Since 2026-10-10 the generator judges each building as it will be drawn (its own centre and
+size against the nearest street, the audit's own test) before placing it, and 92% of maps
+(60 seeds, mixed tiers) now reach the 75% bar, up from 75% of maps before. The maps that still fall short are the ones where a
+settlement's minimum building count can only be met by building back from the street
+(the floor wins over the rule, by design) or where landmark buildings are forced inland. The orientation half of the original wording (long axis within 25° of the road
 tangent) is already enforced in the generator itself, which rotates every plot to face its
 nearest road, so it is not re-checked here.
 

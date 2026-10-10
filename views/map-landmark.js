@@ -148,6 +148,7 @@ function renderLandmarkMap(container, params) {
     <div class="map-layout">
       <div class="map-controls">
         <label>Theme <select id="lm-theme"></select></label>
+        ${ServerMap.toggleHtml('lm')}
         <p class="status-text">Derived from overworld seed ${overworldSeed} at this location -- fixed, can't be reseeded independently.</p>
         <hr>
         <button id="lm-export">Export PNG</button>
@@ -307,8 +308,15 @@ function renderLandmarkMap(container, params) {
   }
 
   generate();
-  container.querySelector('#lm-theme').addEventListener('change', generate);
-  wireMapExportSave(container, canvas, 'lm', (offCtx) => {
+  const server = ServerMap.attach({
+    container, prefix: 'lm', canvas, type: 'landmark', regenerate: generate,
+    params: () => Object.fromEntries(params),
+    theme: () => container.querySelector('#lm-theme').value,
+    onResult: (res) => ServerMap.fillPanel(container.querySelector('#lm-lore'), res.meta.meta && res.meta.meta.lore),
+  });
+  container.querySelector('#lm-theme').addEventListener('change', () => { if (server.active()) server.refresh(); else generate(); });
+  wireMapExportSave(container, canvas, 'lm', async (offCtx) => {
+    if (await server.drawMaster(offCtx)) return;
     const prevCtx = ctx;
     ctx = offCtx;
     generate();

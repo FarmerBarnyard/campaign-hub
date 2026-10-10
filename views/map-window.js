@@ -92,6 +92,7 @@ async function renderWindowMap(container, params, w) {
     <div class="map-layout">
       <div class="map-controls">
         <label>Theme <select id="dt-theme"></select></label>
+        ${w.continent ? '<p class="status-text">Server rendering is not offered for continent-scale zooms (about a minute each).</p>' : ServerMap.toggleHtml('dt')}
         <div class="zoom-nav" role="group" aria-label="Move or zoom this map">
           <button type="button" data-nav="left" aria-label="Move left">&larr;</button>
           <button type="button" data-nav="up" aria-label="Move up">&uarr;</button>
@@ -172,8 +173,16 @@ async function renderWindowMap(container, params, w) {
   generate();
   progress.done();
   if (headline) headingEl.textContent = `${headline} and surroundings (${zoomText}x zoom)`;
-  container.querySelector('#dt-theme').addEventListener('change', generate);
-  wireMapExportSave(container, canvas, 'dt', (offCtx) => {
+  // Optional server render of the same window (rules-free, cached). Only for the standard canvas: a
+  // continent-scale rebuild takes about a minute, too long to wait on.
+  const server = w.continent ? null : ServerMap.attach({
+    container, prefix: 'dt', canvas, type: 'detail', regenerate: generate,
+    params: () => Object.fromEntries(new URLSearchParams(MapWindow.toParams(w))),
+    theme: () => container.querySelector('#dt-theme').value,
+  });
+  container.querySelector('#dt-theme').addEventListener('change', () => { if (server && server.active()) server.refresh(); else generate(); });
+  wireMapExportSave(container, canvas, 'dt', async (offCtx) => {
+    if (server && await server.drawMaster(offCtx)) return;
     const prevCtx = ctx;
     ctx = offCtx;
     generate();

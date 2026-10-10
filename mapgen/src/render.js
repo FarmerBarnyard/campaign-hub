@@ -113,6 +113,22 @@ function makeOverworldStubs(params) {
   };
 }
 
+// views/map-dungeon.js reads its settings off form controls too (it has no params argument), so a headless
+// dungeon is driven the same way. The seed reuses the common `seed` param; the grid and room settings have
+// their own short names, defaulting to the page's own values. `legend` is shared with the overworld.
+function makeDungeonStubs(params) {
+  const p = (key, fallback) => (params && params[key] !== undefined ? params[key] : fallback);
+  const legend = p('legend', undefined);
+  return {
+    '#dg-seed': inputStub(p('seed', 1)),
+    '#dg-w': inputStub(p('dw', 60)),
+    '#dg-h': inputStub(p('dh', 40)),
+    '#dg-min': inputStub(p('dmin', 6)),
+    '#dg-depth': inputStub(p('ddepth', 5)),
+    '#dg-legend': inputStub('', legend !== undefined && legend !== 'false' && legend !== '0' && legend !== ''),
+  };
+}
+
 function makeContainerStub(canvas, theme, extraNamed) {
   const generic = () => ({
     value: '', textContent: '', innerHTML: '', checked: false, style: {}, disabled: false,
@@ -159,11 +175,16 @@ function makeContainerStub(canvas, theme, extraNamed) {
 // The generators fire generate() without awaiting it, but call
 // progress.done() as their last act -- overriding showGenerationProgress
 // gives an exact completion signal without touching generator source.
+//
+// Some views (the landmark) draw synchronously and never ask for a progress overlay at all, so they never
+// signal. `signalled` says whether this render asked for one; if it did not, the render is finished when
+// the entry point returns.
 function installCompletionSignal(sandbox) {
   let resolveDone, rejectDone;
+  let requested = false;
   const done = new Promise((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
-  sandbox.showGenerationProgress = () => ({ update() {}, done() { resolveDone(); } });
-  return { done, fail: (e) => rejectDone(e) };
+  sandbox.showGenerationProgress = () => { requested = true; return { update() {}, done() { resolveDone(); } }; };
+  return { done, fail: (e) => rejectDone(e), requested: () => requested, finish: () => resolveDone() };
 }
 
 // type: 'settlement' | 'dungeon' | 'detail' | 'landmark' | 'overworld'
@@ -184,8 +205,11 @@ async function renderMap({ type, params = {}, scale = 1, theme = 'parchment', tr
     throw new Error(`unknown or unavailable map type: ${type}`);
   }
 
-  const baseW = type === 'settlement' ? (sandbox.SETTLEMENT_CANVAS_SIZE || 700) : type === 'dungeon' ? 900 : 800;
-  const baseH = type === 'settlement' ? (sandbox.SETTLEMENT_CANVAS_SIZE || 700) : type === 'dungeon' ? 600 : 600;
+  // A zoom into a continent-scale overworld (detail with a window, osc=c) is drawn on a canvas twice the
+  // usual size each way (lib/map-window.js canvasFor), so the headless canvas has to match.
+  const continentWindow = type === 'detail' && params.ww !== undefined && params.osc === 'c';
+  const baseW = type === 'settlement' ? (sandbox.SETTLEMENT_CANVAS_SIZE || 700) : type === 'dungeon' ? 900 : continentWindow ? 1600 : 800;
+  const baseH = type === 'settlement' ? (sandbox.SETTLEMENT_CANVAS_SIZE || 700) : type === 'dungeon' ? 600 : continentWindow ? 1200 : 600;
   const canvas = createCanvas(Math.round(baseW * scale), Math.round(baseH * scale));
   if (scale !== 1) canvas.getContext('2d').scale(scale, scale);
 
@@ -204,13 +228,14 @@ async function renderMap({ type, params = {}, scale = 1, theme = 'parchment', tr
   // it only turns a hard crash into a harmless no-op for methods nothing
   // in settlement's own generation path happens to call.
   const canvasView = makeCanvasView(canvas, baseW, baseH);
-  const extraNamed = type === 'overworld' ? makeOverworldStubs(params) : undefined;
+  const extraNamed = type === 'overworld' ? makeOverworldStubs(params) : type === 'dungeon' ? makeDungeonStubs(params) : undefined;
   const { container, captured } = makeContainerStub(canvasView, theme, extraNamed);
 
   if (trace) sandbox.beginRenderTrace();
   const started = Date.now();
   try {
-    sandbox[entry](container, new URLSearchParams(params));
+    const returned = sandbox[entry](container, new URLSearchParams(params));
+    if (!signal.requested()) { await returned; signal.finish(); }
     await Promise.race([
       signal.done,
       new Promise((_, reject) => setTimeout(() => reject(new Error('render timed out')), RENDER_TIMEOUT_MS)),
