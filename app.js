@@ -7,6 +7,7 @@ const routes = {
   'map/settlement': renderSettlementMap,
   'map/detail': renderDetailMap,
   'map/landmark': renderLandmarkMap,
+  'maps': renderMapGallery,
 };
 
 function parseHash() {
@@ -21,6 +22,7 @@ function parseHash() {
 // are reached from the overworld map.
 function navTabFor(route) {
   if (route === 'map/dungeon') return '#/map/dungeon';
+  if (route === 'maps') return '#/maps';
   if (route === 'map/overworld' || route === 'map/settlement' || route === 'map/detail' || route === 'map/landmark') return '#/map/overworld';
   return '#/';
 }
