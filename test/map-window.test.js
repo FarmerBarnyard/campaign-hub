@@ -131,6 +131,29 @@ test("overworld and detail pixels convert both ways", function () {
   assert.ok(Math.abs(s2.scale - 0.25) < 1e-12, "a 4x window is 0.25 overworld pixels per detail pixel");
 });
 
+test("a square canvas gets a square window (the town map), and the 4:3 default is unchanged", function () {
+  var w3 = { seed: 1, sea: 0.42, wx: 0.2, wy: 0.3, ww: 0.25, continent: false };
+  var def = MW.sampler(world, w3), sq = MW.sampler(world, w3, { width: 700, height: 700 });
+  // default: 200 x 150 overworld pixels over 800 x 600 detail pixels
+  assert.ok(Math.abs(def.toDetail(360, 330).x - 800) < 1e-9 && Math.abs(def.toDetail(360, 330).y - 600) < 1e-9);
+  // square: 200 x 200 overworld pixels over 700 x 700 detail pixels, so one overworld pixel is the same length both ways
+  var corner = sq.toDetail(360, 380);
+  assert.ok(Math.abs(corner.x - 700) < 1e-9 && Math.abs(corner.y - 700) < 1e-9);
+  assert.ok(Math.abs(sq.scale - 200 / 700) < 1e-12);
+  var back = sq.toOverworld(350, 350);
+  assert.ok(Math.abs(back.x - 260) < 1e-9 && Math.abs(back.y - 280) < 1e-9, "the middle of the canvas is the middle of the window");
+});
+
+test("worldAddress is the world's own settings and nothing about the rectangle", function () {
+  var win = MW.parse(q("seed=7&oc=150000&oo=5&oi=0&orv=1&os=12&sea=0.4&ofb=10&orb=-5&owz=1&osc=c&wx=0.25&wy=0.25&ww=0.5"));
+  var text = MW.worldAddress(win);
+  assert.strictEqual(text, "oc=150000&oo=5&oi=0&orv=1&os=12&ofb=10&orb=-5&owz=1&osc=c");
+  var again = MW.parse(q(text + "&seed=7&sea=0.4&wx=0&wy=0&ww=1"));
+  assert.strictEqual(again.cells, 150000);
+  assert.strictEqual(again.continent, true);
+  assert.strictEqual(again.forestBias, 10);
+});
+
 test("the river network matches the overworld: sources have flow, a trunk is only drawn once", function () {
   var chains = MW.riverChains(world, 1);
   assert.ok(chains.length > 0, "this seed has rivers");

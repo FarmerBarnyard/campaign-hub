@@ -5,6 +5,7 @@
 // hundreds of seeds back to back and must not have run N depend on run N-1.
 
 const path = require('path');
+const vm = require('vm');
 const { createCanvas } = require('@napi-rs/canvas');
 const { createGeneratorContext } = require('./load-generators');
 
@@ -191,8 +192,19 @@ function installCompletionSignal(sandbox) {
 // params: plain object of URL-style params
 // scale: supersample factor; the generator draws at its normal coordinates
 //        and simply lands on more pixels (a true supersample, not a bigger town)
+// A town map (and a zoom window) rebuilds the whole overworld it sits in, which is most of the cost of a render
+// (about 45 s for a continent). The generators keep the last world in one variable inside their context
+// (overworldWorldCache, lib/overworld-world.js), and every render gets a fresh context, so that is lost between
+// renders. Carry the last world across: the generators only reuse it when the world's own settings match, so
+// handing a different map's world over is harmless (it is rebuilt). One world is held at a time.
+let warmWorld = null;
+
 async function renderMap({ type, params = {}, scale = 1, theme = 'parchment', trace = true }) {
   const { context, sandbox, fonts } = createGeneratorContext({ fontDir: FONT_DIR });
+  if (warmWorld) {
+    sandbox.__warmWorld = warmWorld;
+    vm.runInContext('overworldWorldCache = __warmWorld', context);
+  }
 
   const entry = {
     settlement: 'renderSettlementMap',
@@ -244,6 +256,7 @@ async function renderMap({ type, params = {}, scale = 1, theme = 'parchment', tr
     // Always close the trace, even on failure, so a timed-out render cannot
     // leave tracing on and contaminate the next one.
     var captureTrace = trace ? sandbox.endRenderTrace() : null;
+    try { warmWorld = vm.runInContext('overworldWorldCache', context) || warmWorld; } catch (e) { /* keep the previous one */ }
   }
 
   return {

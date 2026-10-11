@@ -417,7 +417,19 @@ function renderSettlementMap(container, params) {
   const targetAvgHeight = clampParam(params.get('h'), 0.5);
   const targetAvgMoisture = clampParam(params.get('m'), 0.5);
   const sea = clampParam(params.get('sea'), 0.42);
-  const sampleGuide = parseGuideParam(params);
+  // The 64x48 height guide is a coarse sample of the overworld: it loses a narrow neck of land, a lake, the exact
+  // coast, and says nothing of rivers or biomes. When the link also carries the world's own settings (oc, oo ...),
+  // the town rebuilds that world (shared with the overworld page's cache, so it costs nothing when you arrive from
+  // there) and paints its terrain exactly as a zoom window does, centred on the settlement. The guide stays as the
+  // fallback for a link made before that, or one the world cannot be rebuilt from.
+  let sampleGuide = parseGuideParam(params);
+  const worldAddr = (function () {
+    if (!params.get('oc')) return null;
+    // MapWindow.parse only calls .get, and wants a window: give it the whole map (the real window is built below).
+    const whole = { wx: '0', wy: '0', ww: '1' };
+    return MapWindow.parse({ get: (k) => (k in whole ? whole[k] : params.get(k)) });
+  })();
+  let worldWin = null;        // { win, addr } once the world is built
   const coastal = params.get('coastal') === '1';
 
   container.innerHTML = `
@@ -468,6 +480,31 @@ function renderSettlementMap(container, params) {
     const progress = showGenerationProgress(canvas, 'Laying out streets…');
     const theme = MAP_THEMES[container.querySelector('#st-theme').value] || MAP_THEMES[MAP_THEME_DEFAULT];
     const palette = theme.settlement;
+
+    if (worldAddr && !worldWin) {
+      progress.update(0.02, 'Rebuilding the overworld…');
+      await yieldToPaint();
+      const owDim = MapWindow.canvasFor(worldAddr);
+      // The same fraction of the overworld the height guide covered, but square in overworld pixels because the
+      // canvas this is painted on is square.
+      const windowPx = owDim.width / OW_SETTLEMENT_ZOOM_FACTOR;
+      const addr = Object.assign({}, worldAddr, { wx: (clickX - windowPx / 2) / owDim.width, wy: (clickY - windowPx / 2) / owDim.height, ww: windowPx / owDim.width });
+      const world = cachedOverworldWorld(MapWindow.worldParams(addr), owDim.width, owDim.height);
+      const sample = MapWindow.sampler(world, addr, { width: canvas.width, height: canvas.height });
+      const windowCells = (windowPx / world.cellW) * (windowPx / world.cellH);
+      worldWin = {
+        addr,
+        win: {
+          window: addr, world, sample, cellCount: Math.min(14000, Math.max(6000, Math.round(windowCells * 1.2))), noiseAmp: 0.14,
+          forestBias: addr.forestBias, ruggedBias: addr.ruggedBias, wildZones: addr.wildZones,
+        },
+      };
+      // The overworld's lakes sit at land height (they are drawn as water over it), so a height test alone would
+      // put streets and houses on a lake. Settlement logic sees them as water; the terrain painter keeps the plain
+      // heights and draws the lake itself.
+      const lakeAt = sample.lakeAt;
+      sampleGuide = lakeAt ? (u, v) => (lakeAt(u, v) >= 0.5 ? Math.min(sample.heightAt(u, v), sea - 0.1) : sample.heightAt(u, v)) : sample.heightAt;
+    }
 
     // Dedicated rng streams, same isolation convention as the overworld/
     // dungeon generators: mesh geometry, wall-gate placement, building
@@ -1037,7 +1074,7 @@ function renderSettlementMap(container, params) {
     progress.update(0.3, 'Painting terrain…');
     let terrainResult = null;
     if (sampleGuide) {
-      terrainResult = renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide, zone: null, palette: theme.overworld, faithful: true });
+      terrainResult = renderTerrainPatch(ctx, canvas, { seed, sea, targetAvgHeight, targetAvgMoisture, sampleGuide: worldWin ? worldWin.win.sample.heightAt : sampleGuide, zone: null, palette: theme.overworld, faithful: true, win: worldWin ? worldWin.win : undefined });
     } else {
       ctx.fillStyle = palette.ground;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1188,6 +1225,9 @@ function renderSettlementMap(container, params) {
             const fy = by + Math.sin(roadAngle) * off;
             if (fx < 18 || fx > W - 18 || fy < 18 || fy > H - 18) continue;
             if (!isLand(fx, fy) || !outsideTown(fx, fy, 1.02)) continue;
+            // ...and both ends of the strip, so a field never runs out over a lake or the sea.
+            const endX = Math.cos(roadAngle + Math.PI / 2) * stripL / 2, endY = Math.sin(roadAngle + Math.PI / 2) * stripL / 2;
+            if (!isLand(fx + endX, fy + endY) || !isLand(fx - endX, fy - endY)) continue;
             // Strips run perpendicular to the track they open off.
             drawFieldStrip(fx, fy, stripW, stripL, roadAngle + Math.PI / 2);
           }
@@ -2092,7 +2132,7 @@ function renderSettlementMap(container, params) {
   // match this page.
   function serverParams() {
     const out = { seed: overworldSeed, idx, name, tier: tierKey, x: clickX, y: clickY, coastal: params.get('coastal') || '0' };
-    for (const key of ['h', 'm', 'sea', 'guide', 'gw', 'gh', 'zoom']) {
+    for (const key of ['h', 'm', 'sea', 'guide', 'gw', 'gh', 'zoom', 'oc', 'oo', 'oi', 'orv', 'os', 'ofb', 'orb', 'owz', 'osc']) {
       const v = params.get(key);
       if (v !== null && v !== '') out[key] = v;
     }

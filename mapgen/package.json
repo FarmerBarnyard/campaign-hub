@@ -9,6 +9,7 @@
     "spike": "node src/spike.js",
     "audit": "node src/audit.js",
     "audit-types": "node src/audit-types.js",
+    "audit-world": "node src/audit-world.js",
     "smoke": "node src/smoke.js",
     "design-review": "node src/design-review.js"
   },
