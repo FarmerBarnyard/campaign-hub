@@ -22,8 +22,14 @@ RUN apt-get update \
 WORKDIR /app/mapgen
 
 # Dependencies first, so edits to generator source don't re-run npm install.
-COPY mapgen/package.json mapgen/package-lock.json* ./
-RUN npm ci --omit=dev 2>/dev/null || npm install --omit=dev
+#
+# Installed exactly as package-lock.json says (npm ci), with install scripts off:
+# no dependency runs code while the image builds. The native canvas binary ships
+# as a prebuilt optional package, so it needs no postinstall step. There is
+# deliberately no fallback to `npm install`: that would quietly resolve fresh
+# versions whenever the lockfile and package.json disagree.
+COPY mapgen/package.json mapgen/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
 
 # The service loads the browser generators as-is (see src/load-generators.js),
 # so lib/ and views/ ship alongside it -- one implementation of the art, shared
