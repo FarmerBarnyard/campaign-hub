@@ -72,7 +72,7 @@ The app now sits in the same shell as the dashboard: a left sidebar (Overview, O
 - `themes.js`, `shell.js`, `shell.css` and `fonts/` are **hand-copied unchanged from barnyard-hub**, like `auth-gate.js`. Change them there and copy them out again. `test/shell.test.js` checks them (every theme readable in both modes, every background has CSS, the page stays inside its CSP). Run it with `node test/shell.test.js`.
 - `styles.css` is now only this app's layout and the class names its views use; colours come from the shell's tokens. The old header is gone: Library, Dungeon map and Overworld map are a tab strip under the page title (`app.js` marks the current one).
 - Maps still draw on black paper whatever the theme. Beside the controls the canvas may now shrink to fit the row, keeping its shape (the overworld's pointer maths already scales by the canvas's on-screen size).
-- Script order matters: `themes.js` in `<head>`, `shell.js` before `auth-gate.js` (it creates `#auth-status`). All script and stylesheet tags share the `?v=50` cache-bust.
+- Script order matters: `themes.js` in `<head>`, `shell.js` before `auth-gate.js` (it creates `#auth-status`). All script and stylesheet tags in `index.html` share ONE `?v=` cache-bust number (currently `?v=70`); `test/engine.test.js` and `test/map-link.test.js` fail if two numbers appear. When you change any file (including a copy of `shell.js` or `themes.js` from the hub), bump every tag to the same new number.
 ## Map generator
 
 Two independent modes (not linked to content generation):
