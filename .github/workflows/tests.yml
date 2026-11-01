@@ -28,6 +28,6 @@ jobs:
             echo "::endgroup::"
           done
           exit $failed
-      - name: Overworld golden fingerprints (not blocking: they differ between Windows and Linux)
+      - name: Overworld golden fingerprints (not blocking, they differ between Windows and Linux)
         continue-on-error: true
         run: node test/overworld-world.test.js
