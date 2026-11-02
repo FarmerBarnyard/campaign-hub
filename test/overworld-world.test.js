@@ -2,7 +2,9 @@
 // buildWorld closure. test/fixtures/overworld-golden.json holds fingerprints captured from the
 // code BEFORE that extraction, for Standard- and Continent-tier worlds, so any change to the
 // generated world (heights, rivers, biomes, settlements, roads...) fails here by field name.
-// Decimals are rounded before hashing (see helpers/world-digest.js) so this passes on any machine.
+// Engines differ: V8 builds return slightly different Math.sin, cos, atan2, exp and log, and that is
+// enough to change the world. So there is one fixture for Chromium's V8 (Electron here, the same
+// engine as the browser app) and overworld-golden-node.json for Node, on Linux and Windows alike.
 //
 //   node test/overworld-world.test.js
 
@@ -14,7 +16,8 @@ var H = require("./helpers/world-context.js");
 var D = require("./helpers/world-digest.js");
 var configs = require("./helpers/world-configs.js");
 
-var golden = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "overworld-golden.json"), "utf8"));
+var goldenFile = process.versions.electron ? "overworld-golden.json" : "overworld-golden-node.json";
+var golden = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", goldenFile), "utf8"));
 var ctx = H.createContext().context;
 var passed = 0;
 function test(name, fn) { fn(); passed++; console.log("ok - " + name); }

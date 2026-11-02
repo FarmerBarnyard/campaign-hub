@@ -1,22 +1,12 @@
 // A compact, order-stable fingerprint of a built overworld world: one SHA-256 per field, so a
 // refactor that changes a single height, biome, river cell, settlement or road shows up as a named
-// field mismatch instead of a vague "different". Decimals are rounded to 6 places first: builds of
-// V8 can differ in the last bits of Math.sin and friends, so raw bytes differ between machines
-// even when the world is the same.
+// field mismatch instead of a vague "different".
 
 var crypto = require("crypto");
 
-// The + 0 turns -0 into 0, which has different bytes.
-function round(n) { return Math.round(n * 1e6) / 1e6 + 0; }
 function hashBytes(buf) { return crypto.createHash("sha256").update(buf).digest("hex").slice(0, 16); }
-function typed(arr) {
-  // The world is built in a vm context, so instanceof would not match this realm's Float64Array.
-  if (arr.constructor.name === "Float64Array") arr = Float64Array.from(arr, round);
-  return hashBytes(Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength));
-}
-function text(v) {
-  return hashBytes(Buffer.from(JSON.stringify(v, function (k, x) { return typeof x === "number" ? round(x) : x; })));
-}
+function typed(arr) { return hashBytes(Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength)); }
+function text(v) { return hashBytes(Buffer.from(JSON.stringify(v))); }
 
 function digestWorld(w) {
   var d = {
@@ -30,7 +20,7 @@ function digestWorld(w) {
     landmarks: text(w.landmarks),
     wetlowlandOf: typed(w.wetlowlandOf),
     regionZoneOf: text(w.regionZoneOf),
-    riverThreshold: String(round(w.riverThreshold)),
+    riverThreshold: String(w.riverThreshold),
     largestLakeId: w.largestLakeId,
   };
   d.flow = w.flow ? typed(w.flow) : null;
