@@ -1,13 +1,15 @@
-﻿name: Tests
+name: Tests
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  diag:
+  test:
     strategy:
       fail-fast: false
       matrix:
@@ -19,5 +21,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Diagnostic
-        run: node test/diag-heights.js
+      - name: Run every test file
+        shell: bash
+        run: |
+          failed=0
+          for f in test/*.test.js; do
+            echo "::group::$f"
+            node "$f" || { echo "::error file=$f::failed"; failed=1; }
+            echo "::endgroup::"
+          done
+          exit $failed
