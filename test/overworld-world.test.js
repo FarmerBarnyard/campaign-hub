@@ -3,6 +3,12 @@
 // code BEFORE that extraction, for Standard- and Continent-tier worlds, so any change to the
 // generated world (heights, rivers, biomes, settlements, roads...) fails here by field name.
 //
+// Math.sin, Math.cos and Math.atan2 may differ in the last bit between JavaScript engines (Electron's V8 and
+// Node 24's V8 disagree), and the builder amplifies that into a different world. So this test swaps those three
+// functions, inside its own vm context only, for the portable fdlibm versions in helpers/portable-math.js, which
+// gives the same fingerprints on Windows, Linux and macOS. After an intended change to the world builder,
+// regenerate the fixture with: node test/helpers/capture-overworld-golden.js
+//
 //   node test/overworld-world.test.js
 
 var assert = require("assert");
@@ -11,10 +17,12 @@ var path = require("path");
 var vm = require("vm");
 var H = require("./helpers/world-context.js");
 var D = require("./helpers/world-digest.js");
+var PM = require("./helpers/portable-math.js");
 var configs = require("./helpers/world-configs.js");
 
 var golden = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "overworld-golden.json"), "utf8"));
 var ctx = H.createContext().context;
+PM.install(vm, ctx);
 var passed = 0;
 function test(name, fn) { fn(); passed++; console.log("ok - " + name); }
 function build(c) {
@@ -38,6 +46,10 @@ configs.forEach(function (c) {
       assert.deepStrictEqual(got[field], want[field], c.name + ": field '" + field + "' changed");
     });
   });
+});
+
+test("the portable maths never fell back to the engine's own functions", function () {
+  assert.strictEqual(PM.nativeFallbacks(), 0);
 });
 
 test("the same parameters always give the same world", function () {
