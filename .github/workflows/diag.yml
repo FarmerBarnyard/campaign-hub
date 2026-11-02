@@ -18,3 +18,4 @@ jobs:
         with:
           node-version: 24
       - run: node diag/mathdiag.js
+      - run: node test/helpers/capture-golden.js
