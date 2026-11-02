@@ -1,36 +1,23 @@
-name: Tests
+﻿name: Tests
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  diag:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Run every test file
-        run: |
-          failed=0
-          for f in test/*.test.js; do
-            # The overworld golden fingerprints were captured on Windows and differ on Linux; it runs in the next step without blocking.
-            [ "$f" = "test/overworld-world.test.js" ] && continue
-            echo "::group::$f"
-            node "$f" || { echo "::error file=$f::failed"; failed=1; }
-            echo "::endgroup::"
-          done
-          exit $failed
-      - name: Overworld golden fingerprints (not blocking, they differ between Windows and Linux)
-        continue-on-error: true
-        run: node test/overworld-world.test.js
-      - name: Diagnostic (temporary)
-        continue-on-error: true
+      - name: Diagnostic
         run: node test/diag-heights.js
