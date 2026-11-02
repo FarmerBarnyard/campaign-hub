@@ -2,6 +2,7 @@
 // buildWorld closure. test/fixtures/overworld-golden.json holds fingerprints captured from the
 // code BEFORE that extraction, for Standard- and Continent-tier worlds, so any change to the
 // generated world (heights, rivers, biomes, settlements, roads...) fails here by field name.
+// Decimals are rounded before hashing (see helpers/world-digest.js) so this passes on any machine.
 //
 //   node test/overworld-world.test.js
 
@@ -34,9 +35,8 @@ configs.forEach(function (c) {
     var got = D.digestWorld(build(c));
     var want = golden[c.name];
     assert.ok(want, "golden entry exists");
-    Object.keys(want).forEach(function (field) {
-      assert.deepStrictEqual(got[field], want[field], c.name + ": field '" + field + "' changed");
-    });
+    var changed = Object.keys(want).filter(function (field) { return got[field] !== want[field]; });
+    assert.deepStrictEqual(changed, [], c.name + ": fields changed: " + changed.join(", "));
   });
 });
 
